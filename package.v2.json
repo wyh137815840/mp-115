@@ -3,12 +3,13 @@
     "name": "115 AV刮削",
     "description": "识别 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。",
     "labels": "刮削",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "Moviepilot_A.png",
     "author": "local",
     "level": 1,
     "system_version": ">=2.0.0,<3",
     "history": {
+      "v1.1.0": "增加提交入口。页面输入框和 POST /api/v1/plugin/Av115Scraper/task 都可以收下番号或磁力。",
       "v1.0.0": "扫描已登录的 115，刮削 JavBus，把文件洗成标准番号名，并生成本地 strm、nfo 和封面。"
     }
   }

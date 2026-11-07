@@ -12,10 +12,13 @@ _DIR = str(Path(__file__).resolve().parent)
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
+from fastapi import Request
+
 from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
+from av115_intake import classify_line
 from av115_javbus import JavBusClient, default_fetch, download_bytes
 from av115_scan import CloudFile, ScanOptions, join, name_of, norm, parent_path, run_scan
 
@@ -29,9 +32,9 @@ _VIDEO_NOTE = (
 
 class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
-    plugin_desc = "识别 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
+    plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -113,6 +116,22 @@ class Av115Scraper(_PluginBase):
                 "summary": "最近一次结果",
                 "description": "返回最近一次刮削结果",
             },
+            {
+                "path": "/task",
+                "endpoint": self.api_add_task,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "提交番号或磁力",
+                "description": "收下番号或磁力并排队。JSON 正文为 {\"text\":\"SSIS-001\"}，多条用换行。",
+            },
+            {
+                "path": "/task",
+                "endpoint": self.api_list_tasks,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查看已收下的任务",
+                "description": "返回排队中的番号和磁力",
+            },
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -192,15 +211,53 @@ class Av115Scraper(_PluginBase):
     def get_page(self) -> List[dict]:
         running = hasattr(self, "_lock") and self._lock.locked()
         text = ("正在运行。\n" if running else "") + self._page_text()
-        return [{
-            "component": "VAlert",
-            "props": {
-                "type": "info",
-                "variant": "tonal",
-                "text": text,
-                "style": "white-space: pre-line;",
+        return [
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": (
+                        "一行一个番号或磁力。机器人调用 "
+                        "POST /api/v1/plugin/Av115Scraper/task ，"
+                        "请求头带 MoviePilot 的 API 令牌，正文 {\"text\":\"SSIS-001\"}。"
+                    ),
+                    "class": "mb-3",
+                },
             },
-        }]
+            {
+                "component": "VTextarea",
+                "props": {
+                    "model": "text",
+                    "label": "番号或磁力",
+                    "placeholder": "SSIS-001\nmagnet:?xt=urn:btih:...",
+                    "rows": 4,
+                    "variant": "outlined",
+                },
+            },
+            {
+                "component": "VBtn",
+                "text": "加入任务",
+                "props": {"color": "primary", "class": "mt-3"},
+                "events": {
+                    "click": {
+                        "api": "plugin/Av115Scraper/task",
+                        "method": "post",
+                        "params": {"text": "{text}"},
+                    }
+                },
+            },
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": text,
+                    "class": "mt-4",
+                    "style": "white-space: pre-line;",
+                },
+            },
+        ]
 
     def stop_service(self):
         cancel = getattr(self, "_cancel", None)
@@ -215,6 +272,63 @@ class Av115Scraper(_PluginBase):
 
     def api_status(self) -> dict:
         return self.get_data("last_run") or {"ok": False, "error": "还没有运行记录"}
+
+    async def api_add_task(self, request: Request) -> dict:
+        payload = await _read_body(request)
+        chunks = []
+        text = payload.get("text") or request.query_params.get("text") or ""
+        if isinstance(text, str) and text.strip():
+            chunks.append(text)
+        items = payload.get("items") or []
+        if isinstance(items, str):
+            items = [items]
+        if isinstance(items, list):
+            chunks.extend(str(item) for item in items if str(item).strip())
+        accepted = []
+        rejected = []
+        for chunk in chunks:
+            for line in chunk.splitlines():
+                item = classify_line(line)
+                if item is None:
+                    continue
+                if item["kind"] == "invalid":
+                    rejected.append(item)
+                    continue
+                accepted.append(self._enqueue(item))
+        return {
+            "ok": bool(accepted),
+            "accepted": accepted,
+            "rejected": rejected,
+            "error": "" if accepted else "没有收下任何番号或磁力",
+        }
+
+    def api_list_tasks(self) -> dict:
+        tasks = self._load_tasks()
+        return {"ok": True, "tasks": tasks}
+
+    def _enqueue(self, item: dict) -> dict:
+        if not hasattr(self, "_intake_lock"):
+            self._intake_lock = threading.Lock()
+        task = {
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "kind": item["kind"],
+            "text": item["text"],
+            "code": item["code"],
+            "status": "queued",
+            "created_at": _now(),
+        }
+        with self._intake_lock:
+            tasks = self._load_tasks()
+            tasks.insert(0, task)
+            self.save_data("tasks", tasks[:50])
+        return task
+
+    def _load_tasks(self) -> list:
+        try:
+            tasks = self.get_data("tasks") or []
+        except Exception:
+            return []
+        return tasks if isinstance(tasks, list) else []
 
     def run(self) -> dict:
         if not hasattr(self, "_lock"):
@@ -328,9 +442,18 @@ class Av115Scraper(_PluginBase):
             data = self.get_data("last_run") or {}
         except Exception:
             data = {}
+        lines = ["已收下的任务："]
+        tasks = self._load_tasks()
+        if not tasks:
+            lines.append("还没有番号或磁力。")
+        for task in tasks[:20]:
+            label = task.get("code") or task.get("kind") or ""
+            lines.append(f"{task.get('status') or ''}  {label}  {task.get('created_at') or ''}")
+        lines.append("")
         if not data:
-            return "还没有运行记录。建议先打开「只预览」。"
-        lines = [
+            lines.append("还没有运行记录。建议先打开「只预览」。")
+            return "\n".join(lines)
+        lines.extend([
             f"时间：{data.get('finished_at') or ''}",
             f"模式：{'预览' if data.get('dry_run') else '正式'}",
             "重命名 {renamed}，刮削 {scraped}，跳过 {skipped}，失败 {failed}".format(
@@ -339,7 +462,7 @@ class Av115Scraper(_PluginBase):
                 skipped=data.get("skipped", 0),
                 failed=data.get("failed", 0),
             ),
-        ]
+        ])
         if data.get("emby"):
             lines.append(f"Emby：{data['emby']}")
         if data.get("error"):
@@ -427,6 +550,22 @@ def _area(model: str, label: str, placeholder: str) -> dict:
             "props": {"model": model, "label": label, "placeholder": placeholder, "rows": 4},
         }],
     }
+
+
+async def _read_body(request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    try:
+        raw = (await request.body()).decode("utf-8", "replace").strip()
+    except Exception:
+        raw = ""
+    if raw:
+        return {"text": raw}
+    return {}
 
 
 def _as_int(value, default: int) -> int:
