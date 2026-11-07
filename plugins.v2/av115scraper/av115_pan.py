@@ -38,13 +38,14 @@ class Pan115:
         })
         return result if isinstance(result, dict) else {}
 
-    def relocate_code(self, code: str, library_path: str, cloud_id: str, min_bytes: int) -> tuple[int, int]:
+    def relocate_code(self, code: str, library_path: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:
         """正片放进 /片库/番号/。垃圾文件留在云下载，混进片库的再搬回去。"""
         if not code:
             return 0, 0
         code_id = self.ensure_dir(f"{library_path.rstrip('/')}/{code}")
         moved = 0
         junk = 0
+        ready = 0
         seen = set()
         for item in self.search(code):
             identity = str(item.get("fid") or item.get("cid") or "")
@@ -52,16 +53,21 @@ class Pan115:
                 continue
             seen.add(identity)
             if _is_directory(item):
-                video_count, junk_count = self._relocate_children(identity, code_id, cloud_id, min_bytes)
+                video_count, junk_count, ready_count = self._relocate_children(
+                    identity, code_id, cloud_id, min_bytes
+                )
                 moved += video_count
                 junk += junk_count
+                ready += ready_count
                 continue
-            if self._relocate_file(item, code_id, cloud_id, min_bytes):
-                if _keeps_video(item, min_bytes):
-                    moved += 1
-                else:
-                    junk += 1
-        return moved, junk
+            kind = self._relocate_file(item, code_id, cloud_id, min_bytes)
+            if kind == "video":
+                moved += 1
+            elif kind == "junk":
+                junk += 1
+            elif kind == "ready":
+                ready += 1
+        return moved, junk, ready
 
     def search(self, keyword: str) -> list[dict]:
         found = self.client.fs_search({"search_value": keyword, "limit": 40})
@@ -99,30 +105,33 @@ class Pan115:
             return ""
         return _id_of(found)
 
-    def _relocate_children(self, directory_id: str, library_id: str, cloud_id: str, min_bytes: int) -> tuple[int, int]:
+    def _relocate_children(self, directory_id: str, code_id: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:
         moved = 0
         junk = 0
+        ready = 0
         for child in self.list_children(directory_id):
             if _is_directory(child):
                 continue
-            if self._relocate_file(child, library_id, cloud_id, min_bytes):
-                if _keeps_video(child, min_bytes):
-                    moved += 1
-                else:
-                    junk += 1
-        return moved, junk
+            kind = self._relocate_file(child, code_id, cloud_id, min_bytes)
+            if kind == "video":
+                moved += 1
+            elif kind == "junk":
+                junk += 1
+            elif kind == "ready":
+                ready += 1
+        return moved, junk, ready
 
-    def _relocate_file(self, item: dict, library_id: str, cloud_id: str, min_bytes: int) -> bool:
+    def _relocate_file(self, item: dict, code_id: str, cloud_id: str, min_bytes: int) -> str:
         file_id = str(item.get("fid") or "")
         parent = str(item.get("pid") or item.get("cid") or "")
         if not file_id:
-            return False
+            return ""
         keep = _keeps_video(item, min_bytes)
-        target = library_id if keep else cloud_id
+        target = code_id if keep else cloud_id
         if parent == target:
-            return False
+            return "ready" if keep else ""
         self.move(file_id, target)
-        return True
+        return "video" if keep else "junk"
 
 
 class CookieStorage:

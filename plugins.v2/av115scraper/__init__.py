@@ -35,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -98,7 +98,7 @@ class Av115Scraper(_PluginBase):
             self.update_config(config)
             if self._enabled:
                 threading.Thread(target=self.run, name="av115-once", daemon=True).start()
-        threading.Thread(target=self._flush_offline, name="av115-offline", daemon=True).start()
+        threading.Thread(target=self._watch_offline, name="av115-offline", daemon=True).start()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -358,6 +358,16 @@ class Av115Scraper(_PluginBase):
             return []
         return tasks if isinstance(tasks, list) else []
 
+    def _watch_offline(self) -> None:
+        cancel = getattr(self, "_cancel", None)
+        while cancel is None or not cancel.is_set():
+            try:
+                self._flush_offline()
+            except Exception as exc:
+                logger.warning("115 AV刮削离线监视失败：%s", exc)
+            if cancel is not None and cancel.wait(20):
+                return
+
     def _flush_offline(self) -> None:
         for task in list(self._load_tasks()):
             if task.get("kind") == "magnet" and task.get("status") == "queued":
@@ -388,15 +398,21 @@ class Av115Scraper(_PluginBase):
         ready = False
         for task in pending:
             code = task.get("code") or ""
+            folder = f"{library.rstrip('/')}/{code}"
             try:
-                moved, junk = pan.relocate_code(code, library, cloud_id, min_bytes)
+                moved, junk, already = pan.relocate_code(code, library, cloud_id, min_bytes)
+                if moved + already <= 0:
+                    task["status"] = "offline"
+                    task["message"] = "115 还在下载，正片还没出现"
+                    logger.info("115 AV刮削等待 %s 下完", code)
+                    self._update_task(task)
+                    continue
                 task["settled"] = True
                 task["packed"] = True
                 task["status"] = "ready"
-                folder = f"{library.rstrip('/')}/{code}"
-                task["message"] = f"已把 {moved} 个正片放进 {folder}，{junk} 个垃圾文件留在云下载"
-                ready = moved > 0 or True
-                logger.info("115 AV刮削整理 %s：%s", task.get("code") or "", task["message"])
+                task["message"] = f"已把 {moved or already} 个正片放进 {folder}，{junk} 个垃圾文件留在云下载"
+                ready = True
+                logger.info("115 AV刮削整理 %s：%s", code, task["message"])
             except Exception as exc:
                 task["message"] = str(exc)
                 logger.warning("115 AV刮削整理失败：%s", exc)
