@@ -9,8 +9,9 @@ import httpx
 
 from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 
-# webapi.115.com 会被风控成 405，目录操作统一走 App 接口。
+# webapi.115.com 和 App 的 getid、列目录会被风控成 405；列目录改走 aps，搜索和写操作走 App。
 _APP = "https://proapi.115.com/android"
+_APS_LIST = "https://aps.115.com/natsort/files.php"
 _PAGE = 500
 # App 接口连续请求过快也会回 405，容器里的 DNS 偶尔解析失败，都要隔一会儿再试。
 _GAP_SECONDS = 0.6
@@ -29,6 +30,7 @@ class Pan115:
             if key == "UID":
                 uid = value.split("_", 1)[0]
         self.user_id = uid
+        self._dirs = {"/": "0"}
         self.http = httpx.Client(
             timeout=20,
             follow_redirects=True,
@@ -40,32 +42,48 @@ class Pan115:
 
     def ensure_dir(self, path: str) -> str:
         folder = norm(path)
-        if folder == "/":
-            return "0"
-        found = self.dir_id(folder)
-        if found:
-            return found
         parent = "0"
         built = ""
-        for part in folder.strip("/").split("/"):
+        for part in folder.strip("/").split("/") if folder != "/" else []:
             built += "/" + part
-            found = self.dir_id(built)
+            found = self._child_dir(built, parent, part)
             if found:
                 parent = found
                 continue
             made = self._post("/folder/update", {"name": part, "pid": parent, "user_id": self.user_id})
-            parent = _id_of(made) or _id_of(made.get("data")) or self.dir_id(built)
+            parent = _id_of(made) or _id_of(made.get("data")) or self._child_dir(built, parent, part, fresh=True)
             if not parent:
                 raise RuntimeError(f"无法创建 115 目录 {built}")
+            self._dirs[built] = parent
         return parent
 
     def dir_id(self, path: str) -> str:
         folder = norm(path)
-        if folder == "/":
-            return "0"
-        found = self._get("/files/getid", {"path": folder})
-        value = _id_of(found)
-        return "" if value in ("", "0") else value
+        parent = "0"
+        built = ""
+        for part in folder.strip("/").split("/") if folder != "/" else []:
+            built += "/" + part
+            parent = self._child_dir(built, parent, part)
+            if not parent:
+                return ""
+        return parent
+
+    def _child_dir(self, path: str, parent: str, name: str, fresh: bool = False) -> str:
+        if not fresh and path in self._dirs:
+            return self._dirs[path]
+        try:
+            children = self.list_children(parent)
+        except RuntimeError:
+            children = []
+        for child in children:
+            if _is_directory(child) and _name(child) == name:
+                self._dirs[path] = _file_id(child)
+                return self._dirs[path]
+        for item in self.search(name):
+            if _is_directory(item) and _name(item) == name and str(item.get("pid") or "") == parent:
+                self._dirs[path] = _file_id(item)
+                return self._dirs[path]
+        return ""
 
     def add_magnet(self, magnet: str, directory_id: str) -> dict:
         from p115client import P115Client
@@ -109,14 +127,14 @@ class Pan115:
         items = []
         offset = 0
         while True:
-            found = self._get("/2.0/ufile/files", {
+            found = self._call("GET", "", url=_APS_LIST, params={
                 "cid": directory_id,
                 "limit": _PAGE,
                 "offset": offset,
                 "show_dir": 1,
                 "aid": 1,
             })
-            page = _items(found)
+            page = [_from_aps(row, directory_id) for row in _items(found)]
             items.extend(page)
             if len(page) < _PAGE:
                 return items
@@ -149,14 +167,16 @@ class Pan115:
     def _post(self, path: str, data: dict) -> dict:
         return self._call("POST", path, data=data)
 
-    def _call(self, method: str, path: str, **kwargs) -> dict:
+    def _call(self, method: str, path: str, url: str = "", **kwargs) -> dict:
+        target = url or _APP + path
+        path = path or target
         last = ""
         for wait in (0, *_RETRY_WAITS):
             if wait:
                 time.sleep(wait)
             _pace()
             try:
-                response = self.http.request(method, _APP + path, **kwargs)
+                response = self.http.request(method, target, **kwargs)
             except httpx.TransportError as exc:
                 last = f"115 {path} 连接失败：{exc}"
                 continue
@@ -242,6 +262,26 @@ def _items(payload: dict) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("list") or data.get("data") or []
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _from_aps(row: dict, directory_id: str) -> dict:
+    """aps 的目录用 cid 当自己的 id，文件用 fid，文件的 cid 才是父目录。"""
+    if row.get("fid"):
+        return {
+            "fid": str(row.get("fid")),
+            "fc": "1",
+            "fn": row.get("n") or "",
+            "pid": str(row.get("cid") or directory_id),
+            "fs": row.get("s") or 0,
+            "pc": row.get("pc") or "",
+        }
+    return {
+        "fid": str(row.get("cid") or ""),
+        "fc": "0",
+        "fn": row.get("n") or "",
+        "pid": str(row.get("pid") or directory_id),
+        "pc": row.get("pc") or "",
+    }
 
 
 def _id_of(payload) -> str:
