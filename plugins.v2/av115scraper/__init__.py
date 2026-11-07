@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,7 @@ if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 from fastapi import Request
+from fastapi.responses import RedirectResponse, Response
 
 from app.chain.storage import StorageChain
 from app.log import logger
@@ -27,7 +29,7 @@ _VIDEO_NOTE = (
     "先保持「只预览」跑一遍。正式运行结束后，用 MoviePilot 里已保存的 Emby 密钥刷新媒体库，"
     "目标是 Unraid 上的 Emby：http://192.168.1.9:8096。"
     "strm 目录填这台 Emby 媒体库正在扫描的路径。"
-    "播放地址也由这台 Emby 打开，不能写 127.0.0.1；跳转服务在 192.168.1.10:8787。"
+    "播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
 )
 
 
@@ -35,7 +37,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -49,7 +51,7 @@ class Av115Scraper(_PluginBase):
     _storage = "u115"
     _cloud_paths = ""
     _strm_root = "/media/AV"
-    _play_base = "http://192.168.1.10:8787/redirect?pickcode={pickcode}"
+    _play_base = "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
     _javbus_host = "https://www.javbus.com"
     _refresh_emby = True
     _emby_library = "AV"
@@ -75,14 +77,14 @@ class Av115Scraper(_PluginBase):
         self._cloud_paths = str(config.get("cloud_paths") or "")
         self._strm_root = str(config.get("strm_root") or "/media/AV").strip()
         self._play_base = str(
-            config.get("play_base") or "http://192.168.1.10:8787/redirect?pickcode={pickcode}"
+            config.get("play_base") or "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
         ).strip()
         self._javbus_host = str(config.get("javbus_host") or "https://www.javbus.com").strip()
         self._refresh_emby = bool(config.get("refresh_emby", True))
         self._emby_library = str(config.get("emby_library") or "AV").strip() or "AV"
         self._proxy = str(config.get("proxy") or "").strip()
         self._min_size_mb = _as_int(config.get("min_size_mb"), 300)
-        self._interval_seconds = _as_int(config.get("interval_seconds"), 3)
+        self._interval_seconds = _as_int(config.get("interval_seconds"), 8)
         self._overwrite = bool(config.get("overwrite"))
         self._rename_folder = bool(config.get("rename_folder", True))
         self._offline_dir = str(config.get("offline_dir") or "").strip()
@@ -141,6 +143,14 @@ class Av115Scraper(_PluginBase):
                 "summary": "查看已收下的任务",
                 "description": "返回排队中的番号和磁力",
             },
+            {
+                "path": "/redirect",
+                "endpoint": self.api_redirect,
+                "methods": ["GET", "HEAD"],
+                "summary": "115 302 跳转",
+                "description": "按 pickcode 跳转到 115 下载地址，给 Emby 播放 strm 用。",
+                "allow_anonymous": True,
+            },
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -196,7 +206,7 @@ class Av115Scraper(_PluginBase):
                             _field(12, "offline_dir", "离线下载目录", "默认 /云下载，完成后只把正片移到扫描目录"),
                             _area("cloud_paths", "115 目录，每行一个", "/AV/有码\n/AV/FC2"),
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
-                            _field(12, "play_base", "播放地址模板", "http://192.168.1.10:8787/redirect?pickcode={pickcode}"),
+                            _field(12, "play_base", "播放地址模板", "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"),
                             _field(6, "javbus_host", "JavBus 地址", "https://www.javbus.com"),
                             _field(6, "proxy", "JavBus 代理", "http://127.0.0.1:7890，留空则直连"),
                             _field(4, "min_size_mb", "最小体积(MB)", "小于此值视为预告，默认 300"),
@@ -220,7 +230,7 @@ class Av115Scraper(_PluginBase):
             "offline_dir": "/云下载",
             "cloud_paths": "",
             "strm_root": "/media/AV",
-            "play_base": "http://192.168.1.10:8787/redirect?pickcode={pickcode}",
+            "play_base": "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}",
             "refresh_emby": True,
             "emby_library": "AV",
             "javbus_host": "https://www.javbus.com",
@@ -295,6 +305,22 @@ class Av115Scraper(_PluginBase):
 
     def api_status(self) -> dict:
         return self.get_data("last_run") or {"ok": False, "error": "还没有运行记录"}
+
+    def api_redirect(self, request: Request):
+        """Emby 打开 strm 时走这里，302 到 115 直链。"""
+        pickcode = (
+            request.query_params.get("pickcode")
+            or request.query_params.get("pc")
+            or ""
+        ).strip()
+        if not pickcode or not (len(pickcode) == 17 and pickcode.isalnum()):
+            return Response(content="bad pickcode", status_code=400)
+        try:
+            url = self._download_url(pickcode, request.headers.get("user-agent") or "Emby/4.0")
+        except Exception as exc:
+            logger.exception("115 AV刮削跳转失败：%s", exc)
+            return Response(content=f"resolve failed: {exc}", status_code=502)
+        return RedirectResponse(url=url, status_code=302)
 
     async def api_add_task(self, request: Request) -> dict:
         payload = await _read_body(request)
@@ -450,6 +476,30 @@ class Av115Scraper(_PluginBase):
         pan = Pan115(cookie)
         directory_id = pan.ensure_dir(self._offline_save_path())
         return _offline_message(pan.add_magnet(magnet, directory_id))
+
+    def _download_url(self, pickcode: str, user_agent: str) -> str:
+        from p115client import P115Client
+
+        pc = pickcode.strip().lower()
+        ua = user_agent or "Emby/4.0"
+        if not hasattr(self, "_url_cache"):
+            self._url_cache = {}
+            self._url_lock = threading.Lock()
+        key = (pc, ua)
+        now = time.monotonic()
+        with self._url_lock:
+            hit = self._url_cache.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+        cookie = self._cookie_value()
+        if not cookie:
+            raise RuntimeError("没有填写 115 Cookie")
+        url = str(P115Client(cookie, app="android").download_url(pc, user_agent=ua, app="android"))
+        if not url:
+            raise RuntimeError("没有拿到下载地址")
+        with self._url_lock:
+            self._url_cache[key] = (now + 600, url)
+        return url
 
     def _cookie_value(self) -> str:
         own = (getattr(self, "_cookie", "") or "").strip()

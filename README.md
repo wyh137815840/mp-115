@@ -7,10 +7,10 @@ Emby 用 Unraid 上的 `http://192.168.1.9:8096`。插件刷新时走 MoviePilot
 播放地址默认写成：
 
 ```text
-http://192.168.1.10:8787/redirect?pickcode={pickcode}
+https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}
 ```
 
-跳转服务跑在这台 Windows 上。Unraid 的 8787 没有开，所以 strm 里不能写 `127.0.0.1`，否则 Emby 会去连它自己。`strm 目录` 要填 Unraid 上这台 Emby 正在扫描的库路径。
+Emby 打开 strm 时由 MoviePilot 上的「115网盘STRM助手」302 到 115 直链。助手要启用，播放地址填外网可访问的 MoviePilot 域名，不能写 `127.0.0.1`。`strm 目录` 要填这台 Emby 正在扫描的库路径。
 
 ## 安装
 

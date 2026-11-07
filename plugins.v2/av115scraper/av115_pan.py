@@ -13,9 +13,9 @@ from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
 _PAGE = 500
-# App 接口连续请求过快也会回 405，容器里的 DNS 偶尔解析失败，都要隔一会儿再试。
-_GAP_SECONDS = 0.6
-_RETRY_WAITS = (2, 5, 10)
+# App 接口连续请求过快也会回 405，全量扫描时宁可慢，避免 115 风控。
+_GAP_SECONDS = 2.5
+_RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
 _pace_lock = threading.Lock()
 _last_call = [0.0]
