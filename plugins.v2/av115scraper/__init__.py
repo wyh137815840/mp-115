@@ -20,6 +20,7 @@ from app.plugins import _PluginBase
 
 from av115_intake import classify_line
 from av115_javbus import JavBusClient, default_fetch, download_bytes
+from av115_pan import CookieStorage, Pan115
 from av115_scan import CloudFile, ScanOptions, join, name_of, norm, parent_path, run_scan
 
 _VIDEO_NOTE = (
@@ -34,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -192,7 +193,7 @@ class Av115Scraper(_PluginBase):
                                 "115 Cookie",
                                 "和 115网盘订阅助手一样，填写 UID=...; CID=...; SEID=...; KID=...",
                             ),
-                            _field(12, "offline_dir", "离线保存目录", "留空保存到 115 根目录，例如 /AV"),
+                            _field(12, "offline_dir", "离线下载目录", "默认 /云下载，完成后只把正片移到扫描目录"),
                             _area("cloud_paths", "115 目录，每行一个", "/AV/有码\n/AV/FC2"),
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
                             _field(12, "play_base", "播放地址模板", "http://192.168.1.10:8787/redirect?pickcode={pickcode}"),
@@ -216,7 +217,7 @@ class Av115Scraper(_PluginBase):
             "cron": "",
             "storage": "u115",
             "cookie": "",
-            "offline_dir": "",
+            "offline_dir": "/云下载",
             "cloud_paths": "",
             "strm_root": "/media/AV",
             "play_base": "http://192.168.1.10:8787/redirect?pickcode={pickcode}",
@@ -361,6 +362,42 @@ class Av115Scraper(_PluginBase):
         for task in list(self._load_tasks()):
             if task.get("kind") == "magnet" and task.get("status") == "queued":
                 self._push_offline(task)
+        self._settle_downloads()
+
+    def _settle_downloads(self) -> None:
+        cookie = self._cookie_value()
+        if not cookie:
+            return
+        pending = [
+            task for task in self._load_tasks()
+            if task.get("kind") == "magnet" and task.get("status") == "offline" and not task.get("settled")
+        ]
+        if not pending:
+            return
+        try:
+            pan = Pan115(cookie)
+            library = self._library_path()
+            library_id = pan.ensure_dir(library)
+            cloud_id = pan.ensure_dir(self._offline_save_path())
+            min_bytes = max(0, self._min_size_mb) * 1024 * 1024
+        except Exception as exc:
+            logger.warning("115 AV刮削无法整理离线文件：%s", exc)
+            return
+        ready = False
+        for task in pending:
+            try:
+                moved, junk = pan.relocate_code(task.get("code") or "", library_id, cloud_id, min_bytes)
+                task["settled"] = True
+                task["status"] = "ready"
+                task["message"] = f"已把 {moved} 个正片移动到 {library}，{junk} 个垃圾文件留在云下载"
+                ready = moved > 0 or True
+                logger.info("115 AV刮削整理 %s：%s", task.get("code") or "", task["message"])
+            except Exception as exc:
+                task["message"] = str(exc)
+                logger.warning("115 AV刮削整理失败：%s", exc)
+            self._update_task(task)
+        if ready:
+            self.run()
 
     def _push_offline(self, task: dict) -> dict:
         if not self._cookie_value():
@@ -383,14 +420,9 @@ class Av115Scraper(_PluginBase):
         cookie = self._cookie_value()
         if not cookie:
             raise RuntimeError("没有填写 115 Cookie")
-        try:
-            from p115client import P115Client
-        except Exception as exc:
-            raise RuntimeError(f"没有 p115client，无法用 Cookie 添加离线：{exc}") from exc
-        client = P115Client(cookie, app="web")
-        payload = {"url": magnet, "wp_path_id": self._offline_path_id(client)}
-        result = client.clouddownload_task_add_url(payload)
-        return _offline_message(result)
+        pan = Pan115(cookie)
+        directory_id = pan.ensure_dir(self._offline_save_path())
+        return _offline_message(pan.add_magnet(magnet, directory_id))
 
     def _cookie_value(self) -> str:
         own = (getattr(self, "_cookie", "") or "").strip()
@@ -409,8 +441,19 @@ class Av115Scraper(_PluginBase):
                 return value.strip()
         return ""
 
+    def _offline_save_path(self) -> str:
+        path = (getattr(self, "_offline_dir", "") or "").strip() or "/云下载"
+        return path if path.startswith("/") else f"/{path}"
+
+    def _library_path(self) -> str:
+        for line in (getattr(self, "_cloud_paths", "") or "").splitlines():
+            text = line.strip()
+            if text and not text.startswith("#"):
+                return text if text.startswith("/") else f"/{text}"
+        return "/AV"
+
     def _offline_path_id(self, client) -> str:
-        path = getattr(self, "_offline_dir", "") or ""
+        path = self._offline_save_path()
         if not path or path == "/":
             return "0"
         folder = path if path.startswith("/") else f"/{path}"
@@ -483,8 +526,10 @@ class Av115Scraper(_PluginBase):
         )
         mode = "预览" if self._dry_run else "正式"
         logger.info(f"115 AV刮削开始（{mode}），目录 {len(roots)} 个")
+        cookie = self._cookie_value()
+        storage = CookieStorage(Pan115(cookie)) if cookie else _U115Storage(self._storage)
         outcome = run_scan(
-            _U115Storage(self._storage),
+            storage,
             options,
             javbus=self._client(),
             cancel=cancel,
