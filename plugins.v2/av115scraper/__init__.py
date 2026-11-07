@@ -35,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.2"
+    plugin_version = "1.4.3"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -316,8 +316,6 @@ class Av115Scraper(_PluginBase):
                 rejected.append({"text": item["text"][:120], "error": item["error"]})
                 continue
             task = self._enqueue(item)
-            if item["kind"] == "magnet":
-                task = self._push_offline(task)
             accepted.append(task)
         if accepted:
             logger.info("115 AV刮削收下 %s 条，拒绝 %s 条", len(accepted), len(rejected))
