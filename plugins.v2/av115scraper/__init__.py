@@ -34,7 +34,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -85,6 +85,7 @@ class Av115Scraper(_PluginBase):
         self._overwrite = bool(config.get("overwrite"))
         self._rename_folder = bool(config.get("rename_folder", True))
         self._offline_dir = str(config.get("offline_dir") or "").strip()
+        self._cookie = str(config.get("cookie") or "").strip()
         pending = str(config.get("pending_text") or "").strip()
         if pending:
             config["pending_text"] = ""
@@ -186,6 +187,11 @@ class Av115Scraper(_PluginBase):
                             _switch(4, "dry_run", "只预览，不改名不写文件"),
                             _field(6, "cron", "定时", "0 3 * * *，留空则只手动运行"),
                             _field(6, "storage", "存储", "MoviePilot 里的 115 存储 ID，默认 u115"),
+                            _area(
+                                "cookie",
+                                "115 Cookie",
+                                "和 115网盘订阅助手一样，填写 UID=...; CID=...; SEID=...; KID=...",
+                            ),
                             _field(12, "offline_dir", "离线保存目录", "留空保存到 115 根目录，例如 /AV"),
                             _area("cloud_paths", "115 目录，每行一个", "/AV/有码\n/AV/FC2"),
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
@@ -209,6 +215,7 @@ class Av115Scraper(_PluginBase):
             "dry_run": True,
             "cron": "",
             "storage": "u115",
+            "cookie": "",
             "offline_dir": "",
             "cloud_paths": "",
             "strm_root": "/media/AV",
@@ -356,6 +363,11 @@ class Av115Scraper(_PluginBase):
                 self._push_offline(task)
 
     def _push_offline(self, task: dict) -> dict:
+        if not self._cookie_value():
+            task["status"] = "queued"
+            task["message"] = "没有填写 115 Cookie"
+            self._update_task(task)
+            return task
         try:
             task["message"] = self._add_offline(task.get("text") or "")
             task["status"] = "offline"
@@ -368,39 +380,50 @@ class Av115Scraper(_PluginBase):
         return task
 
     def _add_offline(self, magnet: str) -> str:
-        from app.modules.filemanager.storages.u115 import U115Pan
+        cookie = self._cookie_value()
+        if not cookie:
+            raise RuntimeError("没有填写 115 Cookie")
+        try:
+            from p115client import P115Client
+        except Exception as exc:
+            raise RuntimeError(f"没有 p115client，无法用 Cookie 添加离线：{exc}") from exc
+        client = P115Client(cookie, app="web")
+        payload = {"url": magnet, "wp_path_id": self._offline_path_id(client)}
+        result = client.clouddownload_task_add_url(payload)
+        return _offline_message(result)
 
-        client = U115Pan()
-        result = client._request_api(
-            "POST",
-            "/open/offline/add_task_urls",
-            accepted_codes=(0, 20004, 10008),
-            data={"urls": magnet, "wp_path_id": self._offline_path_id()},
-        )
-        if not isinstance(result, dict):
-            raise RuntimeError("115 离线接口没有返回")
-        if result.get("code") in (10008, "10008"):
-            return str(result.get("message") or "115 离线里已经有这条磁力")
-        data = result.get("data")
-        if isinstance(data, dict):
-            data = [data]
-        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
-            raise RuntimeError(str(result.get("message") or "115 没有返回离线任务"))
-        first = data[0]
-        message = str(first.get("message") or "")
-        if first.get("state") or first.get("code") in (0, "0", 10008, "10008") or "已存在" in message:
-            return message or "已添加到 115 离线下载"
-        raise RuntimeError(message or "115 拒绝了这条磁力")
+    def _cookie_value(self) -> str:
+        own = (getattr(self, "_cookie", "") or "").strip()
+        if "UID=" in own:
+            return own
+        try:
+            from app.core.plugin import PluginManager
+            config = PluginManager().get_plugin_config("P115StrmHelper") or {}
+        except Exception:
+            return ""
+        if not isinstance(config, dict):
+            return ""
+        for key in ("cookies", "cookie", "pan_cookie", "pan_cookies"):
+            value = config.get(key)
+            if isinstance(value, str) and "UID=" in value:
+                return value.strip()
+        return ""
 
-    def _offline_path_id(self) -> str:
+    def _offline_path_id(self, client) -> str:
         path = getattr(self, "_offline_dir", "") or ""
         if not path or path == "/":
             return "0"
-        item = StorageChain().get_file_item(storage=self._storage, path=Path(path))
-        fileid = getattr(item, "fileid", None) if item is not None else None
-        if not fileid:
+        folder = path if path.startswith("/") else f"/{path}"
+        try:
+            found = client.fs_dir_getid(folder.rstrip("/"))
+        except Exception as exc:
+            raise RuntimeError(f"找不到 115 目录 {path}：{exc}") from exc
+        file_id = ""
+        if isinstance(found, dict):
+            file_id = str(found.get("id") or found.get("cid") or "")
+        if not file_id or file_id == "0":
             raise RuntimeError(f"找不到 115 目录 {path}")
-        return str(fileid)
+        return file_id
 
     def _update_task(self, task: dict) -> None:
         if not hasattr(self, "_intake_lock"):
@@ -653,6 +676,17 @@ async def _read_body(request) -> dict:
     if raw:
         return {"text": raw}
     return {}
+
+
+def _offline_message(result) -> str:
+    if not isinstance(result, dict):
+        raise RuntimeError("115 离线接口没有返回")
+    message = str(result.get("error_msg") or result.get("error") or result.get("message") or "")
+    state = result.get("state")
+    errno = result.get("errno", result.get("errcode", result.get("code")))
+    if state in (True, 1, "1") or errno in (0, "0") or "已存在" in message:
+        return message or "已添加到 115 离线下载"
+    raise RuntimeError(message or "115 拒绝了这条磁力")
 
 
 def _payload_text(payload) -> list:
