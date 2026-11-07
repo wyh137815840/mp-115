@@ -35,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.4"
+    plugin_version = "1.5.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -395,7 +395,7 @@ class Av115Scraper(_PluginBase):
         except Exception as exc:
             logger.warning("115 AV刮削无法整理离线文件：%s", exc)
             return
-        ready = False
+        ready = []
         for task in pending:
             code = task.get("code") or ""
             folder = f"{library.rstrip('/')}/{code}"
@@ -411,14 +411,20 @@ class Av115Scraper(_PluginBase):
                 task["packed"] = True
                 task["status"] = "ready"
                 task["message"] = f"已把 {moved or already} 个正片放进 {folder}，{junk} 个垃圾文件留在云下载"
-                ready = True
+                if folder not in ready:
+                    ready.append(folder)
                 logger.info("115 AV刮削整理 %s：%s", code, task["message"])
             except Exception as exc:
                 task["message"] = str(exc)
                 logger.warning("115 AV刮削整理失败：%s", exc)
             self._update_task(task)
         if ready:
-            self.run()
+            threading.Thread(
+                target=self.run,
+                kwargs={"roots": ready, "wait": True},
+                name="av115-scrape",
+                daemon=True,
+            ).start()
 
     def _push_offline(self, task: dict) -> dict:
         if not self._cookie_value():
@@ -473,22 +479,6 @@ class Av115Scraper(_PluginBase):
                 return text if text.startswith("/") else f"/{text}"
         return "/AV"
 
-    def _offline_path_id(self, client) -> str:
-        path = self._offline_save_path()
-        if not path or path == "/":
-            return "0"
-        folder = path if path.startswith("/") else f"/{path}"
-        try:
-            found = client.fs_dir_getid(folder.rstrip("/"))
-        except Exception as exc:
-            raise RuntimeError(f"找不到 115 目录 {path}：{exc}") from exc
-        file_id = ""
-        if isinstance(found, dict):
-            file_id = str(found.get("id") or found.get("cid") or "")
-        if not file_id or file_id == "0":
-            raise RuntimeError(f"找不到 115 目录 {path}")
-        return file_id
-
     def _update_task(self, task: dict) -> None:
         if not hasattr(self, "_intake_lock"):
             self._intake_lock = threading.Lock()
@@ -502,16 +492,17 @@ class Av115Scraper(_PluginBase):
                 tasks.insert(0, task)
             self.save_data("tasks", tasks[:50])
 
-    def run(self) -> dict:
+    def run(self, roots: Optional[List[str]] = None, wait: bool = False) -> dict:
         if not hasattr(self, "_lock"):
             self._lock = threading.Lock()
-        if not self._lock.acquire(blocking=False):
+        if not self._lock.acquire(blocking=wait, timeout=1800 if wait else -1):
             logger.info("115 AV刮削已有任务在运行")
             return {"ok": False, "error": "已有任务在运行"}
         flag = getattr(self, "_cancel", None) or threading.Event()
         try:
-            flag.clear()
-            payload = self._execute(flag.is_set)
+            if flag.is_set():
+                return {"ok": False, "error": "已取消"}
+            payload = self._execute(flag.is_set, roots)
             self.save_data("last_run", payload)
             logger.info(
                 "115 AV刮削结束：重命名 %s，刮削 %s，跳过 %s，失败 %s",
@@ -529,12 +520,13 @@ class Av115Scraper(_PluginBase):
         finally:
             self._lock.release()
 
-    def _execute(self, cancel) -> dict:
-        roots = []
-        for line in self._cloud_paths.splitlines():
-            text = line.strip()
-            if text and not text.startswith("#"):
-                roots.append(text)
+    def _execute(self, cancel, only: Optional[List[str]] = None) -> dict:
+        roots = list(only or [])
+        if not roots:
+            for line in self._cloud_paths.splitlines():
+                text = line.strip()
+                if text and not text.startswith("#"):
+                    roots.append(text)
         options = ScanOptions(
             roots=roots,
             strm_root=self._strm_root,

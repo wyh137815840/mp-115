@@ -2,137 +2,169 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
+import httpx
+
 from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
+
+# webapi.115.com 会被风控成 405，目录操作统一走 App 接口。
+_APP = "https://proapi.115.com/android"
+_PAGE = 500
+# App 接口连续请求过快也会回 405，容器里的 DNS 偶尔解析失败，都要隔一会儿再试。
+_GAP_SECONDS = 0.6
+_RETRY_WAITS = (2, 5, 10)
+_RETRY_STATUS = {405, 429, 500, 502, 503, 504}
+_pace_lock = threading.Lock()
+_last_call = [0.0]
 
 
 class Pan115:
     def __init__(self, cookie: str):
-        from p115client import P115Client
-
-        self.client = P115Client(cookie, app="web")
+        self.cookie = cookie
+        uid = ""
+        for part in cookie.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == "UID":
+                uid = value.split("_", 1)[0]
+        self.user_id = uid
+        self.http = httpx.Client(
+            timeout=20,
+            follow_redirects=True,
+            headers={
+                "Cookie": cookie,
+                "User-Agent": "Mozilla/5.0 (Linux; Android 14) 115wangpan_android/36.2.0",
+            },
+        )
 
     def ensure_dir(self, path: str) -> str:
-        folder = path if path.startswith("/") else f"/{path}"
-        folder = folder.rstrip("/") or "/"
-        found = self._dir_id(folder)
+        folder = norm(path)
+        if folder == "/":
+            return "0"
+        found = self.dir_id(folder)
         if found:
             return found
         parent = "0"
         built = ""
         for part in folder.strip("/").split("/"):
             built += "/" + part
-            found = self._dir_id(built)
+            found = self.dir_id(built)
             if found:
                 parent = found
                 continue
-            made = self._web("https://webapi.115.com/files/add", method="POST", data={"pid": parent, "cname": part})
-            parent = _id_of(made) or _id_of(made.get("data") if isinstance(made.get("data"), dict) else {}) or parent
-        if parent == "0":
-            raise RuntimeError(f"无法创建 115 目录 {path}")
+            made = self._post("/folder/update", {"name": part, "pid": parent, "user_id": self.user_id})
+            parent = _id_of(made) or _id_of(made.get("data")) or self.dir_id(built)
+            if not parent:
+                raise RuntimeError(f"无法创建 115 目录 {built}")
         return parent
 
+    def dir_id(self, path: str) -> str:
+        folder = norm(path)
+        if folder == "/":
+            return "0"
+        found = self._get("/files/getid", {"path": folder})
+        value = _id_of(found)
+        return "" if value in ("", "0") else value
+
     def add_magnet(self, magnet: str, directory_id: str) -> dict:
-        result = self.client.clouddownload_task_add_url({
-            "url": magnet,
-            "wp_path_id": directory_id,
-        })
+        from p115client import P115Client
+
+        client = P115Client(self.cookie, app="web")
+        result = client.clouddownload_task_add_url({"url": magnet, "wp_path_id": directory_id})
         return result if isinstance(result, dict) else {}
 
     def relocate_code(self, code: str, library_path: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:
-        """正片放进 /片库/番号/。垃圾文件留在云下载，混进片库的再搬回去。"""
+        """正片放进 /片库/番号/。垃圾文件留在原处，误进片库的搬回云下载。"""
         if not code:
-            return 0, 0
+            return 0, 0, 0
         code_id = self.ensure_dir(f"{library_path.rstrip('/')}/{code}")
         moved = 0
         junk = 0
         ready = 0
         seen = set()
         for item in self.search(code):
-            identity = str(item.get("fid") or item.get("cid") or "")
+            identity = _file_id(item)
             if not identity or identity in seen or identity == code_id:
                 continue
             seen.add(identity)
-            if _is_directory(item):
-                video_count, junk_count, ready_count = self._relocate_children(
-                    identity, code_id, cloud_id, min_bytes
-                )
-                moved += video_count
-                junk += junk_count
-                ready += ready_count
-                continue
-            kind = self._relocate_file(item, code_id, cloud_id, min_bytes)
-            if kind == "video":
-                moved += 1
-            elif kind == "junk":
-                junk += 1
-            elif kind == "ready":
-                ready += 1
+            files = self.list_children(identity) if _is_directory(item) else [item]
+            for child in files:
+                if _is_directory(child):
+                    continue
+                kind = self._relocate_file(child, code_id, cloud_id, min_bytes)
+                if kind == "video":
+                    moved += 1
+                elif kind == "junk":
+                    junk += 1
+                elif kind == "ready":
+                    ready += 1
         return moved, junk, ready
 
     def search(self, keyword: str) -> list[dict]:
-        found = self._web("https://webapi.115.com/files/search", params={"search_value": keyword, "limit": 40, "offset": 0})
+        found = self._get("/2.0/ufile/search", {"search_value": keyword, "limit": 100, "offset": 0, "aid": 1})
         return _items(found)
 
     def list_children(self, directory_id: str) -> list[dict]:
-        found = self._web("https://webapi.115.com/files", params={
-            "cid": directory_id,
-            "limit": 200,
-            "show_dir": 1,
-            "offset": 0,
-        })
-        return _items(found)
+        items = []
+        offset = 0
+        while True:
+            found = self._get("/2.0/ufile/files", {
+                "cid": directory_id,
+                "limit": _PAGE,
+                "offset": offset,
+                "show_dir": 1,
+                "aid": 1,
+            })
+            page = _items(found)
+            items.extend(page)
+            if len(page) < _PAGE:
+                return items
+            offset += _PAGE
 
     def move(self, file_id: str, directory_id: str) -> None:
-        result = self.client.fs_move(file_id, pid=directory_id)
-        if isinstance(result, dict) and result.get("state") in (False, 0):
-            message = result.get("error") or result.get("error_msg") or result.get("message") or "115 拒绝移动"
-            raise RuntimeError(str(message))
+        self._post("/files/move", {"ids": file_id, "to_cid": directory_id, "user_id": self.user_id})
 
     def rename(self, file_id: str, new_name: str) -> None:
-        result = self.client.fs_rename((file_id, new_name))
-        if isinstance(result, dict) and result.get("state") in (False, 0):
-            message = result.get("error") or result.get("error_msg") or result.get("message") or "115 拒绝重命名"
-            raise RuntimeError(str(message))
-
-    def _dir_id(self, path: str) -> str:
-        try:
-            found = self._web("https://webapi.115.com/files/getid", params={"path": path})
-        except Exception:
-            return ""
-        data = found.get("data") if isinstance(found.get("data"), dict) else {}
-        return _id_of(found) or _id_of(data)
-
-    def _web(self, url: str, method: str = "GET", params: dict | None = None, data: dict | None = None) -> dict:
-        result = self.client.request(url, method, params=params, data=data)
-        return result if isinstance(result, dict) else {}
-
-    def _relocate_children(self, directory_id: str, code_id: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:
-        moved = 0
-        junk = 0
-        ready = 0
-        for child in self.list_children(directory_id):
-            if _is_directory(child):
-                continue
-            kind = self._relocate_file(child, code_id, cloud_id, min_bytes)
-            if kind == "video":
-                moved += 1
-            elif kind == "junk":
-                junk += 1
-            elif kind == "ready":
-                ready += 1
-        return moved, junk, ready
+        self._post("/files/batch_rename", {f"files_new_name[{file_id}]": new_name})
 
     def _relocate_file(self, item: dict, code_id: str, cloud_id: str, min_bytes: int) -> str:
-        file_id = str(item.get("fid") or "")
+        file_id = _file_id(item)
         parent = str(item.get("pid") or item.get("cid") or "")
         if not file_id:
             return ""
-        keep = _keeps_video(item, min_bytes)
-        target = code_id if keep else cloud_id
-        if parent == target:
-            return "ready" if keep else ""
-        self.move(file_id, target)
-        return "video" if keep else "junk"
+        if _keeps_video(item, min_bytes):
+            if parent == code_id:
+                return "ready"
+            self.move(file_id, code_id)
+            return "video"
+        if parent == code_id:
+            self.move(file_id, cloud_id)
+            return "junk"
+        return ""
+
+    def _get(self, path: str, params: dict) -> dict:
+        return self._call("GET", path, params=params)
+
+    def _post(self, path: str, data: dict) -> dict:
+        return self._call("POST", path, data=data)
+
+    def _call(self, method: str, path: str, **kwargs) -> dict:
+        last = ""
+        for wait in (0, *_RETRY_WAITS):
+            if wait:
+                time.sleep(wait)
+            _pace()
+            try:
+                response = self.http.request(method, _APP + path, **kwargs)
+            except httpx.TransportError as exc:
+                last = f"115 {path} 连接失败：{exc}"
+                continue
+            if response.status_code in _RETRY_STATUS:
+                last = f"115 {path} 返回 {response.status_code}"
+                continue
+            return _checked(response, path)
+        raise RuntimeError(last)
 
 
 class CookieStorage:
@@ -142,35 +174,34 @@ class CookieStorage:
         self.pan = pan
 
     def stat(self, path: str) -> CloudFile | None:
-        folder = norm(path)
-        name = folder.rsplit("/", 1)[-1]
-        parent = folder.rsplit("/", 1)[0] or "/"
-        if folder == "/":
+        target = norm(path)
+        if target == "/":
             return CloudFile(path="/", name="", is_dir=True, fileid="0")
-        for child in self.list_dir(parent):
-            if child.name == name:
-                return child
-        directory_id = self.pan._dir_id(folder)
-        if not directory_id:
+        name = target.rsplit("/", 1)[-1]
+        parent = target.rsplit("/", 1)[0] or "/"
+        try:
+            siblings = self.list_dir(parent)
+        except FileNotFoundError:
             return None
-        return CloudFile(path=folder, name=name, is_dir=True, fileid=directory_id)
+        return next((child for child in siblings if child.name == name), None)
 
     def list_dir(self, path: str) -> list[CloudFile]:
         folder = norm(path)
-        directory_id = "0" if folder == "/" else self.pan.ensure_dir(folder)
+        directory_id = self.pan.dir_id(folder)
+        if not directory_id:
+            raise FileNotFoundError(folder)
         items = []
         for child in self.pan.list_children(directory_id):
-            name = str(child.get("n") or child.get("fn") or child.get("name") or "")
+            name = _name(child)
             if not name:
                 continue
-            file_id = str(child.get("fid") or child.get("cid") or "")
             items.append(CloudFile(
                 path=join(folder, name),
                 name=name,
                 is_dir=_is_directory(child),
-                size=int(child.get("s") or child.get("size") or 0),
+                size=_size(child),
                 pickcode=str(child.get("pc") or child.get("pickcode") or ""),
-                fileid=file_id,
+                fileid=_file_id(child),
             ))
         return items
 
@@ -179,8 +210,31 @@ class CookieStorage:
         if item is None or not item.fileid:
             raise FileNotFoundError(path)
         self.pan.rename(item.fileid, new_name)
-        parent = path.rsplit("/", 1)[0] or "/"
+        parent = norm(path).rsplit("/", 1)[0] or "/"
         return join(parent, new_name)
+
+
+def _pace() -> None:
+    with _pace_lock:
+        delay = _last_call[0] + _GAP_SECONDS - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        _last_call[0] = time.monotonic()
+
+
+def _checked(response: httpx.Response, path: str) -> dict:
+    if response.status_code != 200:
+        raise RuntimeError(f"115 {path} 返回 {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"115 {path} 返回的不是 JSON") from exc
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("state") in (False, 0) and payload.get("errno") not in (None, 0, "0"):
+        message = payload.get("error") or payload.get("error_msg") or payload.get("message") or payload.get("errno")
+        raise RuntimeError(f"115 {path}：{message}")
+    return payload
 
 
 def _items(payload: dict) -> list[dict]:
@@ -196,15 +250,30 @@ def _id_of(payload) -> str:
     return str(payload.get("id") or payload.get("cid") or payload.get("file_id") or payload.get("fid") or "")
 
 
+def _file_id(item: dict) -> str:
+    return str(item.get("fid") or item.get("file_id") or item.get("cid") or "")
+
+
+def _name(item: dict) -> str:
+    return str(item.get("fn") or item.get("n") or item.get("file_name") or item.get("name") or "")
+
+
+def _size(item: dict) -> int:
+    try:
+        return int(item.get("fs") or item.get("s") or item.get("size") or item.get("file_size") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_directory(item: dict) -> bool:
-    name = str(item.get("n") or item.get("fn") or item.get("name") or "")
+    if "fc" in item:
+        return str(item.get("fc")) == "0"
     if "fid" not in item and "cid" in item:
         return True
-    return not _suffix(name)
+    return not _suffix(_name(item))
 
 
 def _keeps_video(item: dict, min_bytes: int) -> bool:
-    name = str(item.get("n") or item.get("fn") or item.get("name") or "")
-    size = int(item.get("s") or item.get("size") or 0)
-    cloud = CloudFile(path=name, name=name, is_dir=False, size=size)
+    name = _name(item)
+    cloud = CloudFile(path=name, name=name, is_dir=False, size=_size(item))
     return _is_video(cloud, VIDEO_EXTS, min_bytes)
