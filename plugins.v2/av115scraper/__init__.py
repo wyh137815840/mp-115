@@ -35,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -370,14 +370,16 @@ class Av115Scraper(_PluginBase):
             return
         pending = [
             task for task in self._load_tasks()
-            if task.get("kind") == "magnet" and task.get("status") == "offline" and not task.get("settled")
+            if task.get("kind") == "magnet"
+            and task.get("code")
+            and not task.get("packed")
+            and task.get("status") in ("offline", "ready")
         ]
         if not pending:
             return
         try:
             pan = Pan115(cookie)
             library = self._library_path()
-            library_id = pan.ensure_dir(library)
             cloud_id = pan.ensure_dir(self._offline_save_path())
             min_bytes = max(0, self._min_size_mb) * 1024 * 1024
         except Exception as exc:
@@ -385,11 +387,14 @@ class Av115Scraper(_PluginBase):
             return
         ready = False
         for task in pending:
+            code = task.get("code") or ""
             try:
-                moved, junk = pan.relocate_code(task.get("code") or "", library_id, cloud_id, min_bytes)
+                moved, junk = pan.relocate_code(code, library, cloud_id, min_bytes)
                 task["settled"] = True
+                task["packed"] = True
                 task["status"] = "ready"
-                task["message"] = f"已把 {moved} 个正片移动到 {library}，{junk} 个垃圾文件留在云下载"
+                folder = f"{library.rstrip('/')}/{code}"
+                task["message"] = f"已把 {moved} 个正片放进 {folder}，{junk} 个垃圾文件留在云下载"
                 ready = moved > 0 or True
                 logger.info("115 AV刮削整理 %s：%s", task.get("code") or "", task["message"])
             except Exception as exc:

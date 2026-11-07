@@ -38,24 +38,25 @@ class Pan115:
         })
         return result if isinstance(result, dict) else {}
 
-    def relocate_code(self, code: str, library_id: str, cloud_id: str, min_bytes: int) -> tuple[int, int]:
-        """把番号对应的正片移到片库。垃圾文件留在云下载，已经混进去的再搬回去。"""
+    def relocate_code(self, code: str, library_path: str, cloud_id: str, min_bytes: int) -> tuple[int, int]:
+        """正片放进 /片库/番号/。垃圾文件留在云下载，混进片库的再搬回去。"""
         if not code:
             return 0, 0
+        code_id = self.ensure_dir(f"{library_path.rstrip('/')}/{code}")
         moved = 0
         junk = 0
         seen = set()
         for item in self.search(code):
             identity = str(item.get("fid") or item.get("cid") or "")
-            if not identity or identity in seen:
+            if not identity or identity in seen or identity == code_id:
                 continue
             seen.add(identity)
             if _is_directory(item):
-                video_count, junk_count = self._relocate_children(identity, library_id, cloud_id, min_bytes)
+                video_count, junk_count = self._relocate_children(identity, code_id, cloud_id, min_bytes)
                 moved += video_count
                 junk += junk_count
                 continue
-            if self._relocate_file(item, library_id, cloud_id, min_bytes):
+            if self._relocate_file(item, code_id, cloud_id, min_bytes):
                 if _keeps_video(item, min_bytes):
                     moved += 1
                 else:
