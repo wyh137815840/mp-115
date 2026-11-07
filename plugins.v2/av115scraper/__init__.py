@@ -35,7 +35,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.3"
+    plugin_version = "1.4.4"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -368,7 +368,9 @@ class Av115Scraper(_PluginBase):
 
     def _flush_offline(self) -> None:
         for task in list(self._load_tasks()):
-            if task.get("kind") == "magnet" and task.get("status") == "queued":
+            message = task.get("message") or ""
+            retry = task.get("status") == "failed" and "_get_id" in message
+            if task.get("kind") == "magnet" and (task.get("status") == "queued" or retry):
                 self._push_offline(task)
         self._settle_downloads()
 

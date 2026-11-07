@@ -25,8 +25,8 @@ class Pan115:
             if found:
                 parent = found
                 continue
-            made = self.client.fs_mkdir(part, pid=parent)
-            parent = _id_of(made) or parent
+            made = self._web("https://webapi.115.com/files/add", method="POST", data={"pid": parent, "cname": part})
+            parent = _id_of(made) or _id_of(made.get("data") if isinstance(made.get("data"), dict) else {}) or parent
         if parent == "0":
             raise RuntimeError(f"无法创建 115 目录 {path}")
         return parent
@@ -70,21 +70,17 @@ class Pan115:
         return moved, junk, ready
 
     def search(self, keyword: str) -> list[dict]:
-        found = self.client.fs_search({"search_value": keyword, "limit": 40})
-        data = found.get("data") if isinstance(found, dict) else []
-        if isinstance(data, dict):
-            data = data.get("list") or data.get("data") or []
-        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        found = self._web("https://webapi.115.com/files/search", params={"search_value": keyword, "limit": 40, "offset": 0})
+        return _items(found)
 
     def list_children(self, directory_id: str) -> list[dict]:
-        found = self.client.fs_files({
+        found = self._web("https://webapi.115.com/files", params={
             "cid": directory_id,
             "limit": 200,
             "show_dir": 1,
-            "cur": 1,
+            "offset": 0,
         })
-        data = found.get("data") if isinstance(found, dict) else []
-        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        return _items(found)
 
     def move(self, file_id: str, directory_id: str) -> None:
         result = self.client.fs_move(file_id, pid=directory_id)
@@ -100,10 +96,15 @@ class Pan115:
 
     def _dir_id(self, path: str) -> str:
         try:
-            found = self.client.fs_dir_getid(path)
+            found = self._web("https://webapi.115.com/files/getid", params={"path": path})
         except Exception:
             return ""
-        return _id_of(found)
+        data = found.get("data") if isinstance(found.get("data"), dict) else {}
+        return _id_of(found) or _id_of(data)
+
+    def _web(self, url: str, method: str = "GET", params: dict | None = None, data: dict | None = None) -> dict:
+        result = self.client.request(url, method, params=params, data=data)
+        return result if isinstance(result, dict) else {}
 
     def _relocate_children(self, directory_id: str, code_id: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:
         moved = 0
@@ -180,6 +181,13 @@ class CookieStorage:
         self.pan.rename(item.fileid, new_name)
         parent = path.rsplit("/", 1)[0] or "/"
         return join(parent, new_name)
+
+
+def _items(payload: dict) -> list[dict]:
+    data = payload.get("data") if isinstance(payload, dict) else []
+    if isinstance(data, dict):
+        data = data.get("list") or data.get("data") or []
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
 def _id_of(payload) -> str:
