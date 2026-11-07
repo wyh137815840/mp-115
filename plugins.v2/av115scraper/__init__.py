@@ -34,7 +34,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -84,6 +84,11 @@ class Av115Scraper(_PluginBase):
         self._interval_seconds = _as_int(config.get("interval_seconds"), 3)
         self._overwrite = bool(config.get("overwrite"))
         self._rename_folder = bool(config.get("rename_folder", True))
+        pending = str(config.get("pending_text") or "").strip()
+        if pending:
+            config["pending_text"] = ""
+            self.update_config(config)
+            self._accept_text(pending)
         if self._onlyonce:
             self._onlyonce = False
             config["onlyonce"] = False
@@ -169,6 +174,11 @@ class Av115Scraper(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            _area(
+                                "pending_text",
+                                "番号或磁力，保存后加入任务",
+                                "SSIS-001\nmagnet:?xt=urn:btih:...",
+                            ),
                             _switch(4, "enabled", "启用插件"),
                             _switch(4, "onlyonce", "保存后立即运行一次"),
                             _switch(4, "dry_run", "只预览，不改名不写文件"),
@@ -190,6 +200,7 @@ class Av115Scraper(_PluginBase):
                 ],
             }
         ], {
+            "pending_text": "",
             "enabled": False,
             "onlyonce": False,
             "dry_run": True,
@@ -218,9 +229,10 @@ class Av115Scraper(_PluginBase):
                     "type": "info",
                     "variant": "tonal",
                     "text": (
-                        "一行一个番号或磁力。机器人调用 "
-                        "POST /api/v1/plugin/Av115Scraper/task ，"
-                        "请求头带 MoviePilot 的 API 令牌，正文 {\"text\":\"SSIS-001\"}。"
+                        "把番号或磁力贴在下面，点「加入任务」。"
+                        "如果列表没变化，就填到配置里的「番号或磁力」再点保存。"
+                        "机器人调用 POST /api/v1/plugin/Av115Scraper/task ，"
+                        "请求头带 API 令牌，正文 {\"text\":\"SSIS-001\"}。"
                     ),
                     "class": "mb-3",
                 },
@@ -243,7 +255,6 @@ class Av115Scraper(_PluginBase):
                     "click": {
                         "api": "plugin/Av115Scraper/task",
                         "method": "post",
-                        "params": {"text": "{text}"},
                     }
                 },
             },
@@ -275,26 +286,28 @@ class Av115Scraper(_PluginBase):
 
     async def api_add_task(self, request: Request) -> dict:
         payload = await _read_body(request)
-        chunks = []
-        text = payload.get("text") or request.query_params.get("text") or ""
-        if isinstance(text, str) and text.strip():
-            chunks.append(text)
-        items = payload.get("items") or []
-        if isinstance(items, str):
-            items = [items]
-        if isinstance(items, list):
-            chunks.extend(str(item) for item in items if str(item).strip())
+        query_text = request.query_params.get("text") or ""
+        chunks = _payload_text(payload)
+        if query_text.strip():
+            chunks.append(query_text)
+        logger.info("115 AV刮削收到提交，文本段 %s", len(chunks))
+        return self._accept_text("\n".join(chunks))
+
+    def _accept_text(self, text: str) -> dict:
         accepted = []
         rejected = []
-        for chunk in chunks:
-            for line in chunk.splitlines():
-                item = classify_line(line)
-                if item is None:
-                    continue
-                if item["kind"] == "invalid":
-                    rejected.append(item)
-                    continue
-                accepted.append(self._enqueue(item))
+        for line in (text or "").splitlines():
+            item = classify_line(line)
+            if item is None:
+                continue
+            if item["kind"] == "invalid":
+                rejected.append({"text": item["text"][:120], "error": item["error"]})
+                continue
+            accepted.append(self._enqueue(item))
+        if accepted:
+            logger.info("115 AV刮削收下 %s 条，拒绝 %s 条", len(accepted), len(rejected))
+        else:
+            logger.warning("115 AV刮削没有收下任务，拒绝 %s 条", len(rejected))
         return {
             "ok": bool(accepted),
             "accepted": accepted,
@@ -566,6 +579,26 @@ async def _read_body(request) -> dict:
     if raw:
         return {"text": raw}
     return {}
+
+
+def _payload_text(payload) -> list:
+    chunks = []
+    if isinstance(payload, dict):
+        values = payload.values()
+    elif isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, str):
+        values = [payload]
+    else:
+        return chunks
+    for value in values:
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text != "{text}":
+                chunks.append(text)
+        elif isinstance(value, (dict, list)):
+            chunks.extend(_payload_text(value))
+    return chunks
 
 
 def _as_int(value, default: int) -> int:
