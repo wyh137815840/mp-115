@@ -34,7 +34,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.2.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -84,6 +84,7 @@ class Av115Scraper(_PluginBase):
         self._interval_seconds = _as_int(config.get("interval_seconds"), 3)
         self._overwrite = bool(config.get("overwrite"))
         self._rename_folder = bool(config.get("rename_folder", True))
+        self._offline_dir = str(config.get("offline_dir") or "").strip()
         pending = str(config.get("pending_text") or "").strip()
         if pending:
             config["pending_text"] = ""
@@ -95,6 +96,7 @@ class Av115Scraper(_PluginBase):
             self.update_config(config)
             if self._enabled:
                 threading.Thread(target=self.run, name="av115-once", daemon=True).start()
+        threading.Thread(target=self._flush_offline, name="av115-offline", daemon=True).start()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -184,6 +186,7 @@ class Av115Scraper(_PluginBase):
                             _switch(4, "dry_run", "只预览，不改名不写文件"),
                             _field(6, "cron", "定时", "0 3 * * *，留空则只手动运行"),
                             _field(6, "storage", "存储", "MoviePilot 里的 115 存储 ID，默认 u115"),
+                            _field(12, "offline_dir", "离线保存目录", "留空保存到 115 根目录，例如 /AV"),
                             _area("cloud_paths", "115 目录，每行一个", "/AV/有码\n/AV/FC2"),
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
                             _field(12, "play_base", "播放地址模板", "http://192.168.1.10:8787/redirect?pickcode={pickcode}"),
@@ -206,6 +209,7 @@ class Av115Scraper(_PluginBase):
             "dry_run": True,
             "cron": "",
             "storage": "u115",
+            "offline_dir": "",
             "cloud_paths": "",
             "strm_root": "/media/AV",
             "play_base": "http://192.168.1.10:8787/redirect?pickcode={pickcode}",
@@ -303,7 +307,10 @@ class Av115Scraper(_PluginBase):
             if item["kind"] == "invalid":
                 rejected.append({"text": item["text"][:120], "error": item["error"]})
                 continue
-            accepted.append(self._enqueue(item))
+            task = self._enqueue(item)
+            if item["kind"] == "magnet":
+                task = self._push_offline(task)
+            accepted.append(task)
         if accepted:
             logger.info("115 AV刮削收下 %s 条，拒绝 %s 条", len(accepted), len(rejected))
         else:
@@ -342,6 +349,71 @@ class Av115Scraper(_PluginBase):
         except Exception:
             return []
         return tasks if isinstance(tasks, list) else []
+
+    def _flush_offline(self) -> None:
+        for task in list(self._load_tasks()):
+            if task.get("kind") == "magnet" and task.get("status") == "queued":
+                self._push_offline(task)
+
+    def _push_offline(self, task: dict) -> dict:
+        try:
+            task["message"] = self._add_offline(task.get("text") or "")
+            task["status"] = "offline"
+            logger.info("115 AV刮削已提交离线：%s", task.get("code") or task.get("id"))
+        except Exception as exc:
+            task["status"] = "failed"
+            task["message"] = str(exc)
+            logger.warning("115 AV刮削提交离线失败：%s", exc)
+        self._update_task(task)
+        return task
+
+    def _add_offline(self, magnet: str) -> str:
+        from app.modules.filemanager.storages.u115 import U115Pan
+
+        client = U115Pan()
+        result = client._request_api(
+            "POST",
+            "/open/offline/add_task_urls",
+            accepted_codes=(0, 20004, 10008),
+            data={"urls": magnet, "wp_path_id": self._offline_path_id()},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("115 离线接口没有返回")
+        if result.get("code") in (10008, "10008"):
+            return str(result.get("message") or "115 离线里已经有这条磁力")
+        data = result.get("data")
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            raise RuntimeError(str(result.get("message") or "115 没有返回离线任务"))
+        first = data[0]
+        message = str(first.get("message") or "")
+        if first.get("state") or first.get("code") in (0, "0", 10008, "10008") or "已存在" in message:
+            return message or "已添加到 115 离线下载"
+        raise RuntimeError(message or "115 拒绝了这条磁力")
+
+    def _offline_path_id(self) -> str:
+        path = getattr(self, "_offline_dir", "") or ""
+        if not path or path == "/":
+            return "0"
+        item = StorageChain().get_file_item(storage=self._storage, path=Path(path))
+        fileid = getattr(item, "fileid", None) if item is not None else None
+        if not fileid:
+            raise RuntimeError(f"找不到 115 目录 {path}")
+        return str(fileid)
+
+    def _update_task(self, task: dict) -> None:
+        if not hasattr(self, "_intake_lock"):
+            self._intake_lock = threading.Lock()
+        with self._intake_lock:
+            tasks = self._load_tasks()
+            for index, old in enumerate(tasks):
+                if old.get("id") == task.get("id"):
+                    tasks[index] = task
+                    break
+            else:
+                tasks.insert(0, task)
+            self.save_data("tasks", tasks[:50])
 
     def run(self) -> dict:
         if not hasattr(self, "_lock"):
@@ -461,7 +533,9 @@ class Av115Scraper(_PluginBase):
             lines.append("还没有番号或磁力。")
         for task in tasks[:20]:
             label = task.get("code") or task.get("kind") or ""
-            lines.append(f"{task.get('status') or ''}  {label}  {task.get('created_at') or ''}")
+            lines.append(
+                f"{task.get('status') or ''}  {label}  {task.get('message') or ''}  {task.get('created_at') or ''}"
+            )
         lines.append("")
         if not data:
             lines.append("还没有运行记录。建议先打开「只预览」。")
