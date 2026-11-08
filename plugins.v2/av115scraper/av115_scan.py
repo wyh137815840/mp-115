@@ -9,6 +9,7 @@ from pathlib import Path
 from av115_codes import AvCode, choose_code
 from av115_javbus import Movie
 from av115_library import build_nfo, build_play_url, destination, find_existing, safe_name, write_library
+from av115_play import choose_strm_template
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m2ts", ".iso", ".rmvb", ".flv", ".mov", ".m4v"}
 _PREVIEW = ("预告", "sample", "trailer", "preview")
@@ -30,6 +31,8 @@ class ScanOptions:
     roots: list[str]
     strm_root: str
     play_base: str
+    play_base_lan: str = ""
+    strm_use_lan: bool = False
     min_size_mb: int = 300
     interval_seconds: float = 3
     overwrite: bool = False
@@ -169,9 +172,9 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
             result.ok = False
             result.error = "没有填写本地 strm 目录"
             return result
-        if not options.play_base.strip():
+        if not choose_strm_template(options.play_base, options.play_base_lan, options.strm_use_lan).strip():
             result.ok = False
-            result.error = "没有填写播放服务地址"
+            result.error = "没有填写播放地址"
             return result
     protected = set(roots)
     videos: list[CloudFile] = []
@@ -304,7 +307,11 @@ def _handle_video(storage, video, options, counts, protected, strm_root, javbus,
     try:
         write_library(
             dest,
-            strm_url=build_play_url(options.play_base, pickcode, actual_name),
+            strm_url=build_play_url(
+                choose_strm_template(options.play_base, options.play_base_lan, options.strm_use_lan),
+                pickcode,
+                actual_name,
+            ),
             strm_name=Path(actual_name).stem,
             nfo_text=nfo_text,
             cover=cover,

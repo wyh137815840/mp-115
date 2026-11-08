@@ -28,13 +28,23 @@ from av115_fc2 import Fc2Client
 from av115_intake import classify_line
 from av115_javbus import JavBusClient, default_fetch, download_bytes
 from av115_pan import CookieStorage, Pan115
+from av115_play import (
+    DEFAULT_LAN_NETWORKS,
+    LAN_PLAY_BASE,
+    LEGACY_WAN_PLAY_BASE,
+    WAN_PLAY_BASE,
+    redirect_location,
+)
 from av115_scan import CloudFile, ScanOptions, join, name_of, norm, parent_path, run_scan
 
 _VIDEO_NOTE = (
     "先保持「只预览」跑一遍。正式运行结束后，用 MoviePilot 里已保存的 Emby 密钥刷新媒体库，"
     "目标是 Unraid 上的 Emby：http://192.168.1.9:8096。"
     "strm 目录填这台 Emby 媒体库正在扫描的路径。"
-    "播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
+    "内网播放走 http://192.168.1.9:3000 上本插件的跳转，外网播放走 https://mp.yuanhot.top。"
+    "strm 默认写内网地址，家里的 Emby 不再打开外网域名。"
+    "外网好友的播放器如果会自己打开 strm 里的地址，关掉「strm 写内网地址」后重新生成；"
+    "内网客户端打到外网入口时，会按来源 302 回内网地址。公网反代要带 X-Forwarded-For。"
 )
 
 
@@ -42,7 +52,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.6"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -56,7 +66,10 @@ class Av115Scraper(_PluginBase):
     _storage = "u115"
     _cloud_paths = ""
     _strm_root = "/media/AV"
-    _play_base = "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
+    _play_base = WAN_PLAY_BASE
+    _play_base_lan = LAN_PLAY_BASE
+    _lan_networks = DEFAULT_LAN_NETWORKS
+    _strm_use_lan = True
     _javbus_host = "https://www.javbus.com"
     _fc2_host = "https://fc2cmadb.com"
     _fc2_proxy = ""
@@ -83,9 +96,38 @@ class Av115Scraper(_PluginBase):
         self._storage = str(config.get("storage") or "u115").strip() or "u115"
         self._cloud_paths = str(config.get("cloud_paths") or "")
         self._strm_root = str(config.get("strm_root") or "/media/AV").strip()
-        self._play_base = str(
-            config.get("play_base") or "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
-        ).strip()
+        stored_base = str(config.get("play_base") or "").strip()
+        self._play_base = stored_base or WAN_PLAY_BASE
+        changed = False
+        # 只改写旧的默认模板一次。之后用户再填回 P115StrmHelper 地址就保留。
+        if stored_base == LEGACY_WAN_PLAY_BASE and not config.get("play_base_migrated"):
+            self._play_base = WAN_PLAY_BASE
+            config["play_base"] = WAN_PLAY_BASE
+            config["play_base_migrated"] = True
+            changed = True
+        elif not stored_base:
+            config["play_base"] = self._play_base
+            changed = True
+        if "play_base_lan" in config:
+            self._play_base_lan = str(config.get("play_base_lan") or "").strip()
+        else:
+            self._play_base_lan = LAN_PLAY_BASE
+        self._lan_networks = str(config.get("lan_networks") or "").strip() or DEFAULT_LAN_NETWORKS
+        if "strm_use_lan" in config:
+            self._strm_use_lan = bool(config.get("strm_use_lan"))
+        else:
+            self._strm_use_lan = True
+        if "play_base_lan" not in config:
+            config["play_base_lan"] = self._play_base_lan
+            changed = True
+        if "lan_networks" not in config:
+            config["lan_networks"] = self._lan_networks
+            changed = True
+        if "strm_use_lan" not in config:
+            config["strm_use_lan"] = self._strm_use_lan
+            changed = True
+        if changed:
+            self.update_config(config)
         self._javbus_host = str(config.get("javbus_host") or "https://www.javbus.com").strip()
         self._fc2_host = str(config.get("fc2_host") or "https://fc2cmadb.com").strip()
         self._fc2_proxy = str(config.get("fc2_proxy") or "").strip()
@@ -215,7 +257,10 @@ class Av115Scraper(_PluginBase):
                             _field(12, "offline_dir", "离线下载目录", "默认 /云下载，完成后只把正片移到扫描目录"),
                             _area("cloud_paths", "115 目录，每行一个", "/AV/有码\n/AV/FC2"),
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
-                            _field(12, "play_base", "播放地址模板", "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"),
+                            _field(12, "play_base", "外网播放地址模板", WAN_PLAY_BASE),
+                            _field(12, "play_base_lan", "内网播放地址模板", LAN_PLAY_BASE),
+                            _field(12, "lan_networks", "内网网段", DEFAULT_LAN_NETWORKS),
+                            _switch(6, "strm_use_lan", "strm 写内网地址"),
                             _field(6, "javbus_host", "JavBus 地址", "https://www.javbus.com"),
                             _field(6, "proxy", "代理", "http://127.0.0.1:7890，JavBus 使用；FC2 代理留空时也用它"),
                             _field(6, "fc2_host", "FC2 资料站", "https://fc2cmadb.com，留空用默认"),
@@ -241,7 +286,10 @@ class Av115Scraper(_PluginBase):
             "offline_dir": "/云下载",
             "cloud_paths": "",
             "strm_root": "/media/AV",
-            "play_base": "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}",
+            "play_base": WAN_PLAY_BASE,
+            "play_base_lan": LAN_PLAY_BASE,
+            "lan_networks": DEFAULT_LAN_NETWORKS,
+            "strm_use_lan": True,
             "refresh_emby": True,
             "emby_library": "AV",
             "javbus_host": "https://www.javbus.com",
@@ -320,7 +368,7 @@ class Av115Scraper(_PluginBase):
         return self.get_data("last_run") or {"ok": False, "error": "还没有运行记录"}
 
     def api_redirect(self, request: Request):
-        """Emby 打开 strm 时走这里，302 到 115 直链。"""
+        """Emby 打开 strm 时走这里。内网客户端改去内网入口，再 302 到 115 直链。"""
         pickcode = (
             request.query_params.get("pickcode")
             or request.query_params.get("pc")
@@ -328,6 +376,27 @@ class Av115Scraper(_PluginBase):
         ).strip()
         if not pickcode or not (len(pickcode) == 17 and pickcode.isalnum()):
             return Response(content="bad pickcode", status_code=400)
+        filename = (
+            request.query_params.get("file_name")
+            or request.query_params.get("filename")
+            or ""
+        )
+        peer = request.client.host if request.client is not None else ""
+        location = redirect_location(
+            host=request.headers.get("host") or "",
+            forwarded_host=request.headers.get("x-forwarded-host") or "",
+            peer=peer or "",
+            forwarded_for=request.headers.get("x-forwarded-for") or "",
+            real_ip=request.headers.get("x-real-ip") or "",
+            pickcode=pickcode,
+            filename=filename,
+            play_base=self._play_base,
+            play_base_lan=getattr(self, "_play_base_lan", ""),
+            networks=getattr(self, "_lan_networks", ""),
+        )
+        if location:
+            logger.info("115 AV刮削按网络改播放入口：%s", location.split("?", 1)[0])
+            return RedirectResponse(url=location, status_code=302)
         try:
             url = self._download_url(pickcode, request.headers.get("user-agent") or "Emby/4.0")
         except Exception as exc:
@@ -594,6 +663,8 @@ class Av115Scraper(_PluginBase):
             roots=roots,
             strm_root=self._strm_root,
             play_base=self._play_base,
+            play_base_lan=self._play_base_lan,
+            strm_use_lan=self._strm_use_lan,
             min_size_mb=self._min_size_mb,
             interval_seconds=self._interval_seconds,
             overwrite=self._overwrite,
