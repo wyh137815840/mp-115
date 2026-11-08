@@ -4,13 +4,30 @@ MoviePilot V2 插件。扫描已经登录在 MoviePilot 里的 115，识别番�
 
 Emby 用 Unraid 上的 `http://192.168.1.9:8096`。插件刷新时走 MoviePilot 里已经保存的 Emby 地址和密钥，不会连这台 Windows 上的 Emby。
 
-播放地址默认写成：
+播放分内网和外网，都走本插件的 `/redirect`，由它再 302 到 115 直链。P115StrmHelper 不在这个仓库里，本插件不改它的配置。
 
-```text
-https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}
-```
+| 配置键 | 界面 | 默认 |
+| --- | --- | --- |
+| `play_base` | 外网播放地址模板 | `https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect?pickcode={pickcode}&file_name={filename}` |
+| `play_base_lan` | 内网播放地址模板 | `http://192.168.1.9:3000/api/v1/plugin/Av115Scraper/redirect?pickcode={pickcode}&file_name={filename}` |
+| `lan_networks` | 内网网段 | `192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,127.0.0.0/8,::1/128,fc00::/7,fe80::/10` |
+| `strm_use_lan` | strm 写内网地址 | 开 |
 
-Emby 打开 strm 时由 MoviePilot 上的「115网盘STRM助手」302 到 115 直链。助手要启用，播放地址填外网可访问的 MoviePilot 域名，不能写 `127.0.0.1`。`strm 目录` 要填这台 Emby 正在扫描的库路径。
+这四个键是 Av115 自己的。Anime115 如果要做同样的分流，沿用这些名字，不要另起 `lan_base` 或 `moviepilot_address`。
+
+「strm 写内网地址」打开时，新 strm 内容是内网地址。家里的 Emby 直接连 `http://192.168.1.9:3000`，不会去打开 `https://mp.yuanhot.top`。关掉之后，strm 改写外网地址，公网好友的播放器能直接打开；内网客户端打到这个外网入口时，插件看 `X-Forwarded-For`（没有则看直连地址），确认是内网就把请求 302 到内网地址，115 直链在内网入口获取。外网客户端打到内网地址时，则 302 到外网地址。
+
+公网反代要保留原始域名（`X-Forwarded-Host` 或 `Host`）并带上 `X-Forwarded-For`。反代如果把 `Host` 改成内网地址、又不写原始域名，插件不会把这个请求再 302 回公网，避免来回跳。
+
+`strm 目录` 要填这台 Emby 正在扫描的库路径。不能写 `127.0.0.1`：播放器不在 MoviePilot 那台机器上。
+
+## 更新后怎么生效
+
+插件在 MoviePilot 里重载「115 AV刮削」即可，不用重启容器。热重载会清掉 `av115_*` 模块。
+
+**已经写在磁盘上的 strm 不会跟着变。** 旧文件里如果还是 `https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?...`，内网播放仍会走外网域名。关掉「只预览」再跑一遍扫描；已有 `movie.nfo` 时默认只重写 strm，不重刮封面。
+
+外网好友的播放器如果会自己打开 strm 里的地址，而新 strm 写的是 `192.168.1.9`，他们会连不上。关掉「strm 写内网地址」，再跑一遍扫描。
 
 ## 安装
 
@@ -49,7 +66,7 @@ FC2 封面是普通横图，海报不再按 JavBus 那样裁右侧。已经写�
 ## 测试
 
 ```powershell
-python -m unittest tests.test_av115_fc2 -v
+python -m unittest tests.test_av115_fc2 tests.test_av115_play -v
 ```
 
 联网核对上面两个番号：
