@@ -114,7 +114,7 @@ def _is_video(item: CloudFile, extensions: set[str], min_bytes: int) -> bool:
     return True
 
 
-def _collect(storage, root: str, options: ScanOptions, cancel) -> tuple[list[CloudFile], str]:
+def _collect(storage, root: str, options: ScanOptions, cancel, progress=None) -> tuple[list[CloudFile], str]:
     root = norm(root)
     try:
         node = storage.stat(root)
@@ -128,6 +128,7 @@ def _collect(storage, root: str, options: ScanOptions, cancel) -> tuple[list[Clo
         return ([node] if _is_video(node, extensions, min_bytes) else []), ""
     found: list[CloudFile] = []
     stack = [(node.path, 0)]
+    listed = 0
     while stack:
         if cancel():
             return found, "已取消"
@@ -138,11 +139,22 @@ def _collect(storage, root: str, options: ScanOptions, cancel) -> tuple[list[Clo
             children = storage.list_dir(current) or []
         except Exception as exc:
             return found, f"列出 {current} 失败：{exc}"
+        listed += 1
+        child_dirs = 0
         for child in children:
             if child.is_dir:
+                child_dirs += 1
                 stack.append((norm(child.path), depth + 1))
             elif _is_video(child, extensions, min_bytes):
                 found.append(child)
+        if progress:
+            waiting = len(stack)
+            seconds = max(waiting, 1) * 3 if waiting else 0
+            progress(
+                f"列目录 {listed} 个，还要列 {waiting} 个，已发现正片 {len(found)} 个，"
+                f"当前 {current}（本层 {child_dirs} 个子目录）。"
+                f"按每个目录约 3 秒，列完大约还要 {seconds // 60} 分 {seconds % 60} 秒"
+            )
     return found, ""
 
 
@@ -155,7 +167,7 @@ def _sibling_names(storage, parent: str, skip: str) -> set[str]:
     return names
 
 
-def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time.sleep) -> ScanResult:
+def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time.sleep, progress=None) -> ScanResult:
     """执行一次扫描。dry_run 只报告将要发生的事，不改云盘也不写本地文件。"""
     stopped = cancel or (lambda: False)
     result = ScanResult(ok=True, dry_run=options.dry_run)
@@ -179,7 +191,7 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
         if stopped():
             result.error = "已取消"
             break
-        found, error = _collect(storage, root, options, stopped)
+        found, error = _collect(storage, root, options, stopped, progress)
         if error and error != "已取消":
             result.failed += 1
             result.items.append({"status": "failed", "path": root, "code": "", "message": error, "output": ""})
@@ -190,8 +202,11 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
         counts[parent] = counts.get(parent, 0) + 1
 
     strm_root = Path(options.strm_root) if options.strm_root.strip() else None
+    total = len(videos)
+    if progress:
+        progress(f"目录列完，正片 {total} 个，开始刮削")
     armed = False
-    for video in videos:
+    for index, video in enumerate(videos, 1):
         if stopped():
             result.error = "已取消"
             break
@@ -209,6 +224,11 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
         )
         result.items.append(item)
         armed = bool(item.get("scraped"))
+        if progress:
+            progress(
+                f"刮削 {index}/{total}：{item.get('code') or video.path}，{item.get('status') or ''}。"
+                f"已重命名 {result.renamed}，已刮削 {result.scraped}，跳过 {result.skipped}，失败 {result.failed}"
+            )
     if result.failed and not result.error:
         result.ok = True
     return result

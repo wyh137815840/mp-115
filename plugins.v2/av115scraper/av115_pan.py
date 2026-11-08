@@ -210,19 +210,23 @@ class CookieStorage:
         directory_id = self.pan.dir_id(folder)
         if not directory_id:
             raise FileNotFoundError(folder)
+        self.pan._dirs[folder] = directory_id
         items = []
         for child in self.pan.list_children(directory_id):
             name = _name(child)
             if not name:
                 continue
-            items.append(CloudFile(
+            item = CloudFile(
                 path=join(folder, name),
                 name=name,
                 is_dir=_is_directory(child),
                 size=_size(child),
                 pickcode=str(child.get("pc") or child.get("pickcode") or ""),
                 fileid=_file_id(child),
-            ))
+            )
+            if item.is_dir and item.fileid:
+                self.pan._dirs[item.path] = item.fileid
+            items.append(item)
         return items
 
     def rename(self, path: str, new_name: str) -> str:

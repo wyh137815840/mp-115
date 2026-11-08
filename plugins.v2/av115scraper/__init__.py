@@ -41,7 +41,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.3"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -595,11 +595,28 @@ class Av115Scraper(_PluginBase):
         logger.info(f"115 AV刮削开始（{mode}），目录 {len(roots)} 个")
         cookie = self._cookie_value()
         storage = CookieStorage(Pan115(cookie)) if cookie else _U115Storage(self._storage)
+
+        def report(message: str) -> None:
+            logger.info("115 AV刮削 %s", message)
+            self.save_data("last_run", {
+                "ok": True,
+                "error": "",
+                "dry_run": self._dry_run,
+                "finished_at": "",
+                "progress": message,
+                "renamed": 0,
+                "scraped": 0,
+                "failed": 0,
+                "skipped": 0,
+                "items": [],
+            })
+
         outcome = run_scan(
             storage,
             options,
             javbus=self._client(),
             cancel=cancel,
+            progress=report,
         )
         payload = outcome.as_dict()
         payload["finished_at"] = _now()
@@ -674,6 +691,11 @@ class Av115Scraper(_PluginBase):
         lines.append("")
         if not data:
             lines.append("还没有运行记录。建议先打开「只预览」。")
+            return "\n".join(lines)
+        if data.get("progress"):
+            lines.append(f"进度：{data['progress']}")
+        if not data.get("finished_at"):
+            lines.append(f"状态：进行中（{'预览' if data.get('dry_run') else '正式'}）")
             return "\n".join(lines)
         lines.extend([
             f"时间：{data.get('finished_at') or ''}",
