@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 _DIR = str(Path(__file__).resolve().parent)
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
+# MoviePilot 热重载只清 app.plugins.av115scraper，这些模块是按文件名进的 sys.modules。
+for _name in list(sys.modules):
+    if _name == "av115_pan" or _name.startswith("av115_"):
+        del sys.modules[_name]
 
 from fastapi import Request
 from fastapi.responses import RedirectResponse, Response

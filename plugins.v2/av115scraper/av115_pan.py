@@ -287,7 +287,15 @@ def _from_aps(row: dict, directory_id: str) -> dict:
 def _id_of(payload) -> str:
     if not isinstance(payload, dict):
         return ""
-    return str(payload.get("id") or payload.get("cid") or payload.get("file_id") or payload.get("fid") or "")
+    # 新建目录的成功响应把目录 id 放在 category_id，不读这个字段会被当成没建成。
+    return str(
+        payload.get("category_id")
+        or payload.get("id")
+        or payload.get("cid")
+        or payload.get("file_id")
+        or payload.get("fid")
+        or ""
+    )
 
 
 def _file_id(item: dict) -> str:
