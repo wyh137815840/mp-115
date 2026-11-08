@@ -143,16 +143,26 @@ class JavBusClient:
         return None, last
 
 
-def default_fetch(url: str, proxy: str = "", timeout: int = 20) -> tuple[int, str]:
+def default_fetch(
+    url: str,
+    proxy: str = "",
+    timeout: int = 20,
+    headers: dict | None = None,
+    cookies: dict | None = None,
+) -> tuple[int, str]:
     """优先用 MoviePilot 的 RequestUtils，宿主没有时退回 urllib。"""
-    headers = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
-    cookies = {"existmag": "all", "age": "verified"}
+    merged_headers = {"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"}
+    if headers:
+        merged_headers.update(headers)
+    merged_cookies = {"existmag": "all", "age": "verified"}
+    if cookies:
+        merged_cookies.update(cookies)
     try:
         from app.utils.http import RequestUtils
 
         response = RequestUtils(
-            headers=headers,
-            cookies=cookies,
+            headers=merged_headers,
+            cookies=merged_cookies,
             proxies=proxy or None,
             timeout=timeout,
         ).get_res(url)
@@ -160,7 +170,7 @@ def default_fetch(url: str, proxy: str = "", timeout: int = 20) -> tuple[int, st
             return 0, ""
         return int(response.status_code), response.text or ""
     except Exception:
-        return _urllib_fetch(url, proxy, timeout, headers)
+        return _urllib_fetch(url, proxy, timeout, merged_headers, merged_cookies)
 
 
 def download_bytes(url: str, proxy: str = "", timeout: int = 20, referer: str = "") -> bytes:
@@ -185,10 +195,19 @@ def download_bytes(url: str, proxy: str = "", timeout: int = 20, referer: str = 
         return _urllib_bytes(url, proxy, timeout, headers)
 
 
-def _urllib_fetch(url: str, proxy: str, timeout: int, headers: dict) -> tuple[int, str]:
+def _urllib_fetch(
+    url: str,
+    proxy: str,
+    timeout: int,
+    headers: dict,
+    cookies: dict | None = None,
+) -> tuple[int, str]:
     import urllib.request
 
-    request = urllib.request.Request(url, headers=headers)
+    merged = dict(headers)
+    if cookies and "Cookie" not in merged:
+        merged["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
+    request = urllib.request.Request(url, headers=merged)
     opener = _opener(proxy)
     with opener.open(request, timeout=timeout) as response:
         body = response.read()

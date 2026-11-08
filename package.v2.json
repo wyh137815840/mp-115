@@ -1,14 +1,15 @@
 {
   "Av115Scraper": {
     "name": "115 AV刮削",
-    "description": "识别 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。",
+    "description": "识别 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。",
     "labels": "刮削",
-    "version": "1.5.2",
+    "version": "1.5.5",
     "icon": "Moviepilot_A.png",
     "author": "local",
     "level": 1,
     "system_version": ">=2.0.0,<3",
     "history": {
+      "v1.5.5": "FC2 改走 fc2cmadb，失败再试官网和 Wayback，不再请求 JavBus。有码和无码仍走 JavBus。",
       "v1.5.2": "strm 播放地址改为 MoviePilot 3000 端口上 115网盘STRM助手的跳转接口。",
       "v1.5.1": "列目录改走 aps 接口，按名字逐级解析路径并缓存，不再依赖会被风控的 getid。",
       "v1.5.0": "115 目录操作改走 App 接口，网页接口被风控时不再卡死扫描。整理完成后另起线程刮削，离线监视不再被阻塞。",
