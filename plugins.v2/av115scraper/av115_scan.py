@@ -155,7 +155,7 @@ def _sibling_names(storage, parent: str, skip: str) -> set[str]:
     return names
 
 
-def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time.sleep) -> ScanResult:
+def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time.sleep, fc2=None) -> ScanResult:
     """执行一次扫描。dry_run 只报告将要发生的事，不改云盘也不写本地文件。"""
     stopped = cancel or (lambda: False)
     result = ScanResult(ok=True, dry_run=options.dry_run)
@@ -206,6 +206,7 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
             strm_root=strm_root,
             javbus=javbus,
             result=result,
+            fc2=fc2,
         )
         result.items.append(item)
         armed = bool(item.get("scraped"))
@@ -214,7 +215,7 @@ def run_scan(storage, options: ScanOptions, javbus=None, cancel=None, sleep=time
     return result
 
 
-def _handle_video(storage, video, options, counts, protected, strm_root, javbus, result: ScanResult) -> dict:
+def _handle_video(storage, video, options, counts, protected, strm_root, javbus, result: ScanResult, fc2=None) -> dict:
     parent = parent_path(video.path)
     parsed = choose_code(video.name, name_of(parent))
     if parsed is None:
@@ -244,10 +245,11 @@ def _handle_video(storage, video, options, counts, protected, strm_root, javbus,
 
     output = ""
     status = "dry_run" if options.dry_run else "ok"
+    client, label = _metadata_client(parsed.kind, javbus, fc2)
     if options.dry_run:
         if strm_root is not None:
             output = str(destination(strm_root, parsed.labeled))
-        messages.append("预览：未请求 JavBus，也未写文件")
+        messages.append(f"预览：未请求 {label}，也未写文件")
         return _row(status, actual_path, parsed.labeled, "；".join(messages), output)
 
     if strm_root is None:
@@ -272,22 +274,23 @@ def _handle_video(storage, video, options, counts, protected, strm_root, javbus,
     cover = None
     need_meta = existing is None or options.overwrite or not (existing / "movie.nfo").is_file()
     if need_meta:
-        if javbus is None:
+        if client is None:
             result.failed += 1
-            return _row("failed", actual_path, parsed.labeled, "没有配置 JavBus", "")
-        movie, reason = javbus.scrape(parsed.code, parsed.kind)
+            return _row("failed", actual_path, parsed.labeled, f"没有配置 {label}", "")
+        movie, reason = client.scrape(parsed.code, parsed.kind)
         item_scraped = True
+        uid = _uniqueid_type(parsed.kind)
         if movie is None:
-            messages.append(f"JavBus：{reason}，已写仅含番号的 nfo")
-            nfo_text = _nfo(parsed, None)
+            messages.append(f"{label}：{reason}，已写仅含番号的 nfo")
+            nfo_text = _nfo(parsed, None, uid)
             result.failed += 1
             status = "partial"
         else:
             actress = movie.actresses[0] if movie.actresses else ""
             if existing is None:
                 dest = destination(strm_root, parsed.labeled, actress)
-            nfo_text = _nfo(parsed, movie)
-            cover = _cover(javbus, movie)
+            nfo_text = _nfo(parsed, movie, uid)
+            cover = _cover(client, movie)
             if movie.cover and not cover:
                 messages.append("封面下载失败")
             result.scraped += 1
@@ -306,6 +309,7 @@ def _handle_video(storage, video, options, counts, protected, strm_root, javbus,
             nfo_text=nfo_text,
             cover=cover,
             force=options.overwrite,
+            crop=parsed.kind != "fc2",
         )
     except OSError as exc:
         result.failed += 1
@@ -375,7 +379,18 @@ def _rename_folder(storage, options, parent, file_name, parsed: AvCode, counts, 
     return join(new_parent, file_name)
 
 
-def _nfo(parsed: AvCode, movie: Movie | None) -> str:
+def _metadata_client(kind: str, javbus, fc2):
+    """FC2 只用 FC2 客户端。其他番号仍走 JavBus。"""
+    if kind == "fc2":
+        return fc2, "FC2"
+    return javbus, "JavBus"
+
+
+def _uniqueid_type(kind: str) -> str:
+    return "fc2" if kind == "fc2" else "javbus"
+
+
+def _nfo(parsed: AvCode, movie: Movie | None, uniqueid_type: str = "javbus") -> str:
     if movie is None:
         return build_nfo(
             code=parsed.code,
@@ -389,6 +404,7 @@ def _nfo(parsed: AvCode, movie: Movie | None) -> str:
             genres=[],
             actresses=[],
             tag=parsed.tag,
+            uniqueid_type=uniqueid_type,
         )
     return build_nfo(
         code=parsed.code,
@@ -402,6 +418,7 @@ def _nfo(parsed: AvCode, movie: Movie | None) -> str:
         genres=list(movie.genres),
         actresses=list(movie.actresses),
         tag=parsed.tag,
+        uniqueid_type=uniqueid_type,
     )
 
 

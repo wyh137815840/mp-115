@@ -74,6 +74,7 @@ def build_nfo(
     genres: list[str],
     actresses: list[str],
     tag: str,
+    uniqueid_type: str = "javbus",
 ) -> str:
     """生成 Emby 电影 nfo。"""
     movie = ET.Element("movie")
@@ -90,7 +91,7 @@ def build_nfo(
     add("sorttitle", code)
     add("num", code)
     unique = ET.SubElement(movie, "uniqueid")
-    unique.set("type", "javbus")
+    unique.set("type", uniqueid_type or "javbus")
     unique.set("default", "true")
     unique.text = code
     if release:
@@ -149,6 +150,7 @@ def write_library(
     nfo_text: str | None,
     cover: bytes | None,
     force: bool,
+    crop: bool = True,
 ) -> None:
     """写 strm。nfo 和封面只在缺失或 force 时覆盖。"""
     dest.mkdir(parents=True, exist_ok=True)
@@ -160,6 +162,6 @@ def write_library(
         fanart = dest / "fanart.jpg"
         poster = dest / "poster.jpg"
         fanart.write_bytes(cover)
-        poster_bytes = crop_poster(cover)
+        poster_bytes = crop_poster(cover) if crop else cover
         poster.write_bytes(poster_bytes)
         (dest / "folder.jpg").write_bytes(poster_bytes)

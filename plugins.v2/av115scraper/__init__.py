@@ -1,4 +1,4 @@
-"""扫描 MoviePilot 已登录的 115，刮削 JavBus，并生成本地 strm。"""
+"""扫描 MoviePilot 已登录的 115，刮削元数据，并生成本地 strm。"""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
+from av115_fc2 import Fc2Client
 from av115_intake import classify_line
 from av115_javbus import JavBusClient, default_fetch, download_bytes
 from av115_pan import CookieStorage, Pan115
@@ -39,9 +40,9 @@ _VIDEO_NOTE = (
 
 class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
-    plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号，刮削 JavBus，重命名并生成本地 strm。"
+    plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.5"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -57,6 +58,8 @@ class Av115Scraper(_PluginBase):
     _strm_root = "/media/AV"
     _play_base = "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
     _javbus_host = "https://www.javbus.com"
+    _fc2_host = "https://fc2cmadb.com"
+    _fc2_proxy = ""
     _refresh_emby = True
     _emby_library = "AV"
     _proxy = ""
@@ -84,6 +87,8 @@ class Av115Scraper(_PluginBase):
             config.get("play_base") or "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"
         ).strip()
         self._javbus_host = str(config.get("javbus_host") or "https://www.javbus.com").strip()
+        self._fc2_host = str(config.get("fc2_host") or "https://fc2cmadb.com").strip()
+        self._fc2_proxy = str(config.get("fc2_proxy") or "").strip()
         self._refresh_emby = bool(config.get("refresh_emby", True))
         self._emby_library = str(config.get("emby_library") or "AV").strip() or "AV"
         self._proxy = str(config.get("proxy") or "").strip()
@@ -212,9 +217,11 @@ class Av115Scraper(_PluginBase):
                             _field(6, "strm_root", "strm 目录", "/media/AV"),
                             _field(12, "play_base", "播放地址模板", "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url?pickcode={pickcode}&file_name={filename}"),
                             _field(6, "javbus_host", "JavBus 地址", "https://www.javbus.com"),
-                            _field(6, "proxy", "JavBus 代理", "http://127.0.0.1:7890，留空则直连"),
+                            _field(6, "proxy", "代理", "http://127.0.0.1:7890，JavBus 使用；FC2 代理留空时也用它"),
+                            _field(6, "fc2_host", "FC2 资料站", "https://fc2cmadb.com，留空用默认"),
+                            _field(6, "fc2_proxy", "FC2 代理", "留空则沿用上面的代理"),
                             _field(4, "min_size_mb", "最小体积(MB)", "小于此值视为预告，默认 300"),
-                            _field(4, "interval_seconds", "刮削间隔(秒)", "每次请求 JavBus 的间隔"),
+                            _field(4, "interval_seconds", "刮削间隔(秒)", "每部影片请求间隔"),
                             _switch(4, "rename_folder", "只有一部片的文件夹也改名"),
                             _switch(4, "overwrite", "覆盖已有 nfo 和封面"),
                             _switch(4, "refresh_emby", "完成后刷新 Emby"),
@@ -238,6 +245,8 @@ class Av115Scraper(_PluginBase):
             "refresh_emby": True,
             "emby_library": "AV",
             "javbus_host": "https://www.javbus.com",
+            "fc2_host": "https://fc2cmadb.com",
+            "fc2_proxy": "",
             "proxy": "",
             "min_size_mb": 300,
             "interval_seconds": 3,
@@ -599,6 +608,7 @@ class Av115Scraper(_PluginBase):
             storage,
             options,
             javbus=self._client(),
+            fc2=self._fc2_client(),
             cancel=cancel,
         )
         payload = outcome.as_dict()
@@ -656,6 +666,29 @@ class Av115Scraper(_PluginBase):
             return download_bytes(url, proxy=proxy, timeout=20, referer=host.rstrip("/") + "/")
 
         return JavBusClient(host, fetch, download)
+
+    def _fc2_client(self) -> Fc2Client:
+        proxy = (getattr(self, "_fc2_proxy", "") or "").strip() or self._proxy
+        host = (getattr(self, "_fc2_host", "") or "").strip() or "https://fc2cmadb.com"
+
+        def fetch(url: str, headers=None):
+            return default_fetch(
+                url,
+                proxy=proxy,
+                timeout=20,
+                headers=headers,
+                cookies={"ageVerified": "true"},
+            )
+
+        def download(url: str) -> bytes:
+            return download_bytes(
+                url,
+                proxy=proxy,
+                timeout=20,
+                referer="https://adult.contents.fc2.com/",
+            )
+
+        return Fc2Client(host, fetch, download)
 
     def _page_text(self) -> str:
         try:
