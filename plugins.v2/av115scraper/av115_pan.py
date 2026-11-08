@@ -85,11 +85,12 @@ class Pan115:
                 return self._dirs[path]
         return ""
 
-    def add_magnet(self, magnet: str, directory_id: str) -> dict:
+    def add_magnet(self, url: str, directory_id: str) -> dict:
+        """115 离线添加。url 原样提交，磁力链和 ed2k 都走这个接口。"""
         from p115client import P115Client
 
         client = P115Client(self.cookie, app="web")
-        result = client.clouddownload_task_add_url({"url": magnet, "wp_path_id": directory_id})
+        result = client.clouddownload_task_add_url({"url": url, "wp_path_id": directory_id})
         return result if isinstance(result, dict) else {}
 
     def relocate_code(self, code: str, library_path: str, cloud_id: str, min_bytes: int) -> tuple[int, int, int]:

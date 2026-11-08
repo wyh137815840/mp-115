@@ -25,7 +25,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 
 from av115_fc2 import Fc2Client
-from av115_intake import classify_line
+from av115_intake import classify_line, is_offline_kind, is_offline_task
 from av115_javbus import JavBusClient, default_fetch, download_bytes
 from av115_pan import CookieStorage, Pan115
 from av115_play import (
@@ -50,9 +50,9 @@ _VIDEO_NOTE = (
 
 class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
-    plugin_desc = "接收番号或磁力，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
+    plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.6"
+    plugin_version = "1.5.7"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -183,8 +183,8 @@ class Av115Scraper(_PluginBase):
                 "endpoint": self.api_add_task,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "提交番号或磁力",
-                "description": "收下番号或磁力并排队。JSON 正文为 {\"text\":\"SSIS-001\"}，多条用换行。",
+                "summary": "提交番号、磁力或 ed2k",
+                "description": "收下番号、磁力或 ed2k 并排队。JSON 正文为 {\"text\":\"ed2k://|file|...|/\"} 或 {\"items\":[\"ed2k://|file|...|/\"]}，多条用换行。",
             },
             {
                 "path": "/task",
@@ -192,7 +192,7 @@ class Av115Scraper(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "查看已收下的任务",
-                "description": "返回排队中的番号和磁力",
+                "description": "返回排队中的番号、磁力和 ed2k",
             },
             {
                 "path": "/redirect",
@@ -241,8 +241,8 @@ class Av115Scraper(_PluginBase):
                         "content": [
                             _area(
                                 "pending_text",
-                                "番号或磁力，保存后加入任务",
-                                "SSIS-001\nmagnet:?xt=urn:btih:...",
+                                "番号、磁力或 ed2k，保存后加入任务",
+                                "SSIS-001\nmagnet:?xt=urn:btih:...\ned2k://|file|SSIS-001.mp4|...|/",
                             ),
                             _switch(4, "enabled", "启用插件"),
                             _switch(4, "onlyonce", "保存后立即运行一次"),
@@ -312,10 +312,10 @@ class Av115Scraper(_PluginBase):
                     "type": "info",
                     "variant": "tonal",
                     "text": (
-                        "把番号或磁力贴在下面，点「加入任务」。"
-                        "如果列表没变化，就填到配置里的「番号或磁力」再点保存。"
+                        "把番号、磁力或 ed2k 贴在下面，点「加入任务」。"
+                        "如果列表没变化，就填到配置里的「番号、磁力或 ed2k」再点保存。"
                         "机器人调用 POST /api/v1/plugin/Av115Scraper/task ，"
-                        "请求头带 API 令牌，正文 {\"text\":\"SSIS-001\"}。"
+                        "请求头带 API 令牌，正文 {\"text\":\"SSIS-001\"}，也可以是磁力或 ed2k。"
                     ),
                     "class": "mb-3",
                 },
@@ -324,8 +324,8 @@ class Av115Scraper(_PluginBase):
                 "component": "VTextarea",
                 "props": {
                     "model": "text",
-                    "label": "番号或磁力",
-                    "placeholder": "SSIS-001\nmagnet:?xt=urn:btih:...",
+                    "label": "番号、磁力或 ed2k",
+                    "placeholder": "SSIS-001\nmagnet:?xt=urn:btih:...\ned2k://|file|SSIS-001.mp4|...|/",
                     "rows": 4,
                     "variant": "outlined",
                 },
@@ -433,7 +433,7 @@ class Av115Scraper(_PluginBase):
             "ok": bool(accepted),
             "accepted": accepted,
             "rejected": rejected,
-            "error": "" if accepted else "没有收下任何番号或磁力",
+            "error": "" if accepted else "没有收下任何番号、磁力或 ed2k",
         }
 
     def api_list_tasks(self) -> dict:
@@ -476,9 +476,7 @@ class Av115Scraper(_PluginBase):
 
     def _flush_offline(self) -> None:
         for task in list(self._load_tasks()):
-            message = task.get("message") or ""
-            retry = task.get("status") == "failed" and "_get_id" in message
-            if task.get("kind") == "magnet" and (task.get("status") == "queued" or retry):
+            if is_offline_task(task):
                 self._push_offline(task)
         self._settle_downloads()
 
@@ -488,7 +486,7 @@ class Av115Scraper(_PluginBase):
             return
         pending = [
             task for task in self._load_tasks()
-            if task.get("kind") == "magnet"
+            if is_offline_kind(str(task.get("kind") or ""))
             and task.get("code")
             and not task.get("packed")
             and task.get("status") in ("offline", "ready")
@@ -551,13 +549,13 @@ class Av115Scraper(_PluginBase):
         self._update_task(task)
         return task
 
-    def _add_offline(self, magnet: str) -> str:
+    def _add_offline(self, url: str) -> str:
         cookie = self._cookie_value()
         if not cookie:
             raise RuntimeError("没有填写 115 Cookie")
         pan = Pan115(cookie)
         directory_id = pan.ensure_dir(self._offline_save_path())
-        return _offline_message(pan.add_magnet(magnet, directory_id))
+        return _offline_message(pan.add_magnet(url, directory_id))
 
     def _download_url(self, pickcode: str, user_agent: str) -> str:
         from p115client import P115Client
@@ -769,7 +767,7 @@ class Av115Scraper(_PluginBase):
         lines = ["已收下的任务："]
         tasks = self._load_tasks()
         if not tasks:
-            lines.append("还没有番号或磁力。")
+            lines.append("还没有番号、磁力或 ed2k。")
         for task in tasks[:20]:
             label = task.get("code") or task.get("kind") or ""
             lines.append(
@@ -902,7 +900,7 @@ def _offline_message(result) -> str:
     errno = result.get("errno", result.get("errcode", result.get("code")))
     if state in (True, 1, "1") or errno in (0, "0") or "已存在" in message:
         return message or "已添加到 115 离线下载"
-    raise RuntimeError(message or "115 拒绝了这条磁力")
+    raise RuntimeError(message or "115 拒绝了这条离线链接")
 
 
 def _payload_text(payload) -> list:
