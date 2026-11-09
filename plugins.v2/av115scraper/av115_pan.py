@@ -9,7 +9,9 @@ import httpx
 
 from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 
-# webapi.115.com 和 App 的 getid、列目录会被风控成 405；列目录改走 aps，搜索和写操作走 App。
+# 列目录走 aps。搜索、移动、重命名仍走 App。
+# 建目录走网页 files/add（p115client.fs_mkdir）。App 的 /folder/update 在验证码之后会连续失败。
+# 路径已在时用网页 getid；返回的 id 为 0 表示还没看见，不当成目录。扫描列目录不走 getid。
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
 _PAGE = 500
@@ -17,6 +19,10 @@ _PAGE = 500
 _GAP_SECONDS = 2.5
 _RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
+_MKDIR_TRIES = 3
+_GETID_RACE_WAITS = (0.4, 0.8)
+# 网页 files/add 在目录已存在时返回这个 errno。
+_EXISTS_ERRNO = {"20004"}
 _pace_lock = threading.Lock()
 _last_call = [0.0]
 
@@ -41,21 +47,96 @@ class Pan115:
         )
 
     def ensure_dir(self, path: str) -> str:
+        """逐级保证目录存在。创建走网页 fs_mkdir，已存在则用 getid 取回 id。"""
         folder = norm(path)
         parent = "0"
         built = ""
         for part in folder.strip("/").split("/") if folder != "/" else []:
             built += "/" + part
-            found = self._child_dir(built, parent, part)
-            if found:
-                parent = found
-                continue
-            made = self._post("/folder/update", {"name": part, "pid": parent, "user_id": self.user_id})
-            parent = _id_of(made) or _id_of(made.get("data")) or self._child_dir(built, parent, part, fresh=True)
+            parent = self._ensure_level(built, parent, part)
             if not parent:
                 raise RuntimeError(f"无法创建 115 目录 {built}")
             self._dirs[built] = parent
         return parent
+
+    def _ensure_level(self, built: str, parent: str, name: str) -> str:
+        cached = self._dirs.get(built) or ""
+        if cached and cached != "0":
+            return cached
+        found = self._web_getid(built)
+        if found:
+            return found
+        found = self._web_mkdir(parent, name, built)
+        if found:
+            return found
+        return self._child_dir(built, parent, name, fresh=True)
+
+    def _web(self):
+        client = getattr(self, "_p115", None)
+        if client is None:
+            from p115client import P115Client
+
+            client = P115Client(self.cookie, app="web")
+            self._p115 = client
+        return client
+
+    def _web_getid(self, path: str) -> str:
+        """网页 files/getid。id 为 0、失败或被风控时返回空，交给 mkdir 或列目录。"""
+        try:
+            payload = self._web().fs_dir_getid(path)
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("state") in (False, 0) and not _exists_errno(payload):
+            errno = payload.get("errno")
+            if errno not in (None, 0, "0", ""):
+                return ""
+        return _real_id(payload)
+
+    def _web_mkdir(self, parent: str, name: str, built: str) -> str:
+        """网页 files/add。最多试三次；已存在或响应里没有 id 时，用 getid 把竞态里的 0 等掉。"""
+        saw_exists = False
+        for attempt in range(_MKDIR_TRIES):
+            made = self._call_fs_mkdir(parent, name)
+            found = _real_id(made)
+            if found:
+                return found
+            saw_exists = saw_exists or _folder_exists(made)
+            found = self._web_getid(built)
+            if found:
+                return found
+            if saw_exists or attempt + 1 == _MKDIR_TRIES:
+                return self._retry_getid(built)
+            time.sleep(_GETID_RACE_WAITS[min(attempt, len(_GETID_RACE_WAITS) - 1)])
+        return ""
+
+    def _retry_getid(self, path: str) -> str:
+        for wait in _GETID_RACE_WAITS:
+            time.sleep(wait)
+            found = self._web_getid(path)
+            if found:
+                return found
+        return ""
+
+    def _call_fs_mkdir(self, parent: str, name: str) -> dict:
+        """pid + cname 是网页 files/add 的参数。旧客户端只收名字加 pid 时再退一次。"""
+        client = self._web()
+        calls = (
+            lambda: client.fs_mkdir({"pid": parent, "cname": name}),
+            lambda: client.fs_mkdir(name, pid=parent),
+        )
+        last = "fs_mkdir 不可用"
+        for call in calls:
+            try:
+                made = call()
+            except TypeError as exc:
+                last = str(exc)
+                continue
+            except Exception as exc:
+                return {"state": False, "error": str(exc)}
+            return made if isinstance(made, dict) else {}
+        return {"state": False, "error": last}
 
     def dir_id(self, path: str) -> str:
         folder = norm(path)
@@ -288,7 +369,7 @@ def _from_aps(row: dict, directory_id: str) -> dict:
 def _id_of(payload) -> str:
     if not isinstance(payload, dict):
         return ""
-    # 新建目录的成功响应把目录 id 放在 category_id，不读这个字段会被当成没建成。
+    # 网页 files/add 把 id 放在 file_id 或 cid；旧的 App 响应放在 category_id。
     return str(
         payload.get("category_id")
         or payload.get("id")
@@ -297,6 +378,32 @@ def _id_of(payload) -> str:
         or payload.get("fid")
         or ""
     )
+
+
+def _real_id(payload) -> str:
+    """目录 id。0 表示 getid 还没看见，或这不是一个目录 id。"""
+    if not isinstance(payload, dict):
+        return ""
+    found = _id_of(payload)
+    if not found or found == "0":
+        data = payload.get("data")
+        found = _id_of(data) if isinstance(data, dict) else ""
+    if found and found != "0":
+        return found
+    return ""
+
+
+def _folder_exists(payload: dict) -> bool:
+    if not payload:
+        return False
+    text = str(payload.get("error") or payload.get("error_msg") or payload.get("message") or "")
+    if "已存在" in text:
+        return True
+    return _exists_errno(payload)
+
+
+def _exists_errno(payload: dict) -> bool:
+    return str(payload.get("errno") or payload.get("errNo") or "") in _EXISTS_ERRNO
 
 
 def _file_id(item: dict) -> str:
