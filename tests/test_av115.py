@@ -179,9 +179,176 @@ class IntakeTests(unittest.TestCase):
         self.assertNotIn("番号或磁力", init)
         self.assertNotIn("番号和磁力", init)
         self.assertNotIn("这条磁力", init)
-        self.assertIn("plugin_version = \"1.5.7\"", init)
-        self.assertIn('"version": "1.5.7"', package)
+        self.assertIn("plugin_version = \"1.5.8\"", init)
+        self.assertIn('"version": "1.5.8"', package)
         self.assertIn("ed2k 链接", package)
+        self.assertIn("fs_mkdir", package)
+
+
+class _WebClient:
+    """最小的网页客户端：只实现 fs_dir_getid / fs_mkdir。"""
+
+    def __init__(self, cookie, app=None, getid=None, mkdir=None, calls=None):
+        self.cookie = cookie
+        self.app = app
+        self._getid = getid or {}
+        self._mkdir = mkdir
+        self.calls = calls if calls is not None else []
+        self.calls.append(("init", cookie, app))
+
+    def fs_dir_getid(self, path):
+        found = self._getid.get(path, "0")
+        if isinstance(found, list):
+            value = found.pop(0) if len(found) > 1 else found[0]
+        else:
+            value = found
+        self.calls.append(("getid", path, value))
+        return {"state": True, "id": value, "error": ""}
+
+    def fs_mkdir(self, payload, pid=0):
+        self.calls.append(("mkdir", payload, pid))
+        if self._mkdir is not None:
+            return self._mkdir(payload, pid)
+        return {"state": True, "data": {"file_id": "42"}}
+
+
+class EnsureDirTests(unittest.TestCase):
+    def setUp(self):
+        import av115_pan
+
+        self.pan_mod = av115_pan
+        self.sleeps = []
+        self._sleep = av115_pan.time.sleep
+        av115_pan.time.sleep = lambda seconds: self.sleeps.append(seconds)
+        self._previous = sys.modules.get("p115client")
+        self.calls = []
+        self.client = None
+
+    def tearDown(self):
+        self.pan_mod.time.sleep = self._sleep
+        if getattr(self, "pan", None) is not None:
+            self.pan.http.close()
+        if self._previous is None:
+            sys.modules.pop("p115client", None)
+        else:
+            sys.modules["p115client"] = self._previous
+
+    def _open(self, getid=None, mkdir=None, client_cls=None):
+        calls = self.calls
+
+        class Client(_WebClient):
+            def __init__(self, cookie, app=None):
+                super().__init__(cookie, app, getid=getid, mkdir=mkdir, calls=calls)
+
+        sys.modules["p115client"] = types.SimpleNamespace(P115Client=client_cls or Client)
+        from av115_pan import Pan115
+
+        self.pan = Pan115("UID=1_A; CID=2; SEID=3")
+        self.pan.http.request = self._no_http
+        return self.pan
+
+    def _no_http(self, *args, **kwargs):
+        raise AssertionError(f"建目录不应再打 App/aps：{args} {kwargs}")
+
+    def test_root_does_not_call_webapi(self):
+        pan = self._open()
+        self.assertEqual(pan.ensure_dir("/"), "0")
+        self.assertEqual(self.calls, [])
+
+    def test_existing_path_uses_getid_and_skips_mkdir(self):
+        pan = self._open(getid={"/AV": "5", "/AV/EBOD-531": "531"})
+        self.assertEqual(pan.ensure_dir("/AV/EBOD-531"), "531")
+        self.assertEqual(
+            [item for item in self.calls if item[0] == "mkdir"],
+            [],
+        )
+        self.assertEqual(self.calls[0][2], "web")
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(pan.ensure_dir("/AV/EBOD-531"), "531")
+        self.assertEqual([item[0] for item in self.calls], ["init", "getid", "getid"])
+
+    def test_mkdir_sends_pid_and_cname(self):
+        pan = self._open(getid={"/AV": "5", "/AV/ABF-308-C": "0"})
+        self.assertEqual(pan.ensure_dir("/AV/ABF-308-C"), "42")
+        mkdirs = [item for item in self.calls if item[0] == "mkdir"]
+        self.assertEqual(mkdirs, [("mkdir", {"pid": "5", "cname": "ABF-308-C"}, 0)])
+        self.assertEqual(self.sleeps, [])
+
+    def test_old_client_accepts_name_and_pid(self):
+        calls = self.calls
+
+        class OldClient:
+            def __init__(self, cookie, app=None):
+                calls.append(("init", cookie, app))
+
+            def fs_dir_getid(self, path):
+                calls.append(("getid", path))
+                return {"id": "0", "state": True}
+
+            def fs_mkdir(self, payload, pid=0):
+                if isinstance(payload, dict):
+                    raise TypeError("old signature")
+                calls.append(("mkdir", payload, pid))
+                return {"state": True, "file_id": "7"}
+
+        pan = self._open(client_cls=OldClient)
+        self.assertEqual(pan.ensure_dir("/云下载"), "7")
+        self.assertEqual(calls[-1], ("mkdir", "云下载", "0"))
+
+    def test_exists_then_getid_race_returns_id(self):
+        pan = self._open(
+            getid={"/AV": ["0", "0", "88"]},
+            mkdir=lambda payload, pid: {
+                "state": False,
+                "errno": 20004,
+                "error": "该目录名称已存在。",
+            },
+        )
+        self.assertEqual(pan.ensure_dir("/AV"), "88")
+        self.assertEqual([item[0] for item in self.calls if item[0] == "mkdir"], ["mkdir"])
+        self.assertEqual(self.sleeps, [0.4])
+        self.assertEqual(
+            [item[2] for item in self.calls if item[0] == "getid"],
+            ["0", "0", "88"],
+        )
+
+    def test_list_dir_fallback_when_webapi_misses(self):
+        pan = self._open(
+            getid={"/AV": "5", "/AV/SONE-573": "0"},
+            mkdir=lambda payload, pid: {"state": False, "errno": 405, "error": "405"},
+        )
+        pan.list_children = lambda directory_id: [
+            {"fid": "573", "fc": "0", "fn": "SONE-573", "pid": directory_id}
+        ]
+        pan.search = lambda keyword: []
+        self.assertEqual(pan.ensure_dir("/AV/SONE-573"), "573")
+        self.assertEqual(len([item for item in self.calls if item[0] == "mkdir"]), 3)
+
+    def test_missing_dir_keeps_the_failure_text(self):
+        pan = self._open(
+            getid={"/AV": "5", "/AV/MISSING": "0"},
+            mkdir=lambda payload, pid: {"state": False, "error": "拒绝"},
+        )
+        pan.list_children = lambda directory_id: []
+        pan.search = lambda keyword: []
+        with self.assertRaises(RuntimeError) as caught:
+            pan.ensure_dir("/AV/MISSING")
+        self.assertEqual(str(caught.exception), "无法创建 115 目录 /AV/MISSING")
+
+    def test_dir_id_still_lists_instead_of_getid(self):
+        pan = self._open()
+        pan.list_children = lambda directory_id: [
+            {"fid": "5", "fc": "0", "fn": "AV", "pid": "0"}
+        ]
+        pan.search = lambda keyword: []
+        self.assertEqual(pan.dir_id("/AV"), "5")
+        self.assertEqual(self.calls, [])
+
+    def test_create_does_not_post_folder_update(self):
+        source = (ROOT / "plugins.v2" / "av115scraper" / "av115_pan.py").read_text(encoding="utf-8")
+        self.assertNotIn('"/folder/update"', source)
+        self.assertIn("fs_mkdir", source)
+        self.assertIn("fs_dir_getid", source)
 
 
 if __name__ == "__main__":

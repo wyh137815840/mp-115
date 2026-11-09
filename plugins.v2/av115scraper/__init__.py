@@ -52,7 +52,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.7"
+    plugin_version = "1.5.8"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
