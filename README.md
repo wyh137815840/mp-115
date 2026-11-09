@@ -37,6 +37,8 @@ Emby 用 Unraid 上的 `http://192.168.1.9:8096`。插件刷新时走 MoviePilot
 
 ## 使用
 
+详情页、配置里的输入框，以及 `POST /api/v1/plugin/Av115Scraper/task`，可以提交番号、磁力或 `ed2k://|file|...|/`。ed2k 和磁力一样进 115 离线下载。
+
 1. MoviePilot 里先登录 115，存储 ID 保持 `u115`。
 2. 填写 115 目录，每行一个，例如 `/AV/有码`。
 3. strm 目录填 `/media/AV`。这是 Unraid Emby 里 AV 库正在扫描的路径，库 ID 是 4，类型是电影。MoviePilot 容器里要能写到这个目录。
@@ -66,7 +68,7 @@ FC2 封面是普通横图，海报不再按 JavBus 那样裁右侧。已经写�
 ## 测试
 
 ```powershell
-python -m unittest tests.test_av115_fc2 tests.test_av115_play -v
+python -m unittest tests.test_av115 tests.test_av115_fc2 tests.test_av115_play -v
 ```
 
 联网核对上面两个番号：
