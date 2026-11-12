@@ -396,5 +396,55 @@ class ListChildrenPagingTests(unittest.TestCase):
         self.assertEqual(calls, [0, 500])
 
 
+    def _pan_with_fallback(self, total):
+        import httpx
+
+        import av115_pan
+
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(total)]
+        calls = {"aps": [], "web": []}
+
+        def handler(request):
+            from urllib.parse import parse_qs
+
+            params = parse_qs(request.url.query.decode())
+            offset = int(params.get("offset", ["0"])[0])
+            limit = int(params.get("limit", ["500"])[0])
+            is_aps = "natsort" in request.url.path
+            calls["aps" if is_aps else "web"].append(offset)
+            if is_aps:
+                # aps 只给前 500 条；offset 到边界后从头回绕
+                page = rows[:500] if offset >= 500 else rows[offset:offset + 500]
+                return httpx.Response(200, json={"state": True, "count": total, "offset": offset, "data": page})
+            page = rows[offset:offset + limit]
+            return httpx.Response(200, json={"state": True, "count": total, "offset": offset, "data": page})
+
+        pan = av115_pan.Pan115("UID=1_A; CID=x; SEID=y; KID=z")
+        pan.http.close()
+        pan.http = httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
+        return pan, calls
+
+    def test_aps_truncation_falls_back_to_web_files(self):
+        pan, calls = self._pan_with_fallback(503)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 503)
+        self.assertEqual(len({row["fid"] for row in got}), 503)
+        self.assertTrue(calls["web"], "aps 只取到 500/503 时应走 web 兜底")
+
+    def test_web_fallback_handles_more_than_aps_window(self):
+        pan, calls = self._pan_with_fallback(2500)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 2500)
+        self.assertEqual(len({row["fid"] for row in got}), 2500)
+        self.assertGreaterEqual(len(calls["web"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
