@@ -27,6 +27,8 @@ _WEB_PAGE = 1000
 _PAGE = 500
 # aps 回绕兜底：正常目录远小于这个页数（500*200=10 万条）
 _APS_MAX_PAGES = 200
+# 同一进程内重复列同一目录（扫描多个 root 时最常见）的短缓存，写操作会清空。
+_LISTING_TTL = 60.0
 # App 接口连续请求过快也会回 405，全量扫描时宁可慢，避免 115 风控。
 _GAP_SECONDS = 2.5
 _RETRY_WAITS = (5, 20, 40)
@@ -49,6 +51,8 @@ class Pan115:
                 uid = value.split("_", 1)[0]
         self.user_id = uid
         self._dirs = {"/": "0"}
+        self._children_cache = {}
+        self._children_lock = threading.Lock()
         self.http = httpx.Client(
             timeout=20,
             follow_redirects=True,
@@ -69,6 +73,7 @@ class Pan115:
             if not parent:
                 raise RuntimeError(f"无法创建 115 目录 {built}")
             self._dirs[built] = parent
+        self._invalidate_listing_cache()
         return parent
 
     def _ensure_level(self, built: str, parent: str, name: str) -> str:
@@ -227,6 +232,10 @@ class Pan115:
         2) 用 aps 返回的 count（目录总条目数）判断是否漏项；
         3) 漏项时用 web /files（limit=1000、offset 正常分页、count 为总数）补齐。
         """
+        with self._children_lock:
+            cached = self._children_cache.get(str(directory_id))
+            if cached is not None and cached[0] > time.monotonic():
+                return list(cached[1])
         items = []
         seen = set()
         offset = 0
@@ -280,7 +289,13 @@ class Pan115:
         if total is not None and len(items) < total:
             logger.warning("115 目录 %s 只列出 %s/%s 项，可能被接口上限截断",
                            directory_id, len(items), total)
+        with self._children_lock:
+            self._children_cache[str(directory_id)] = (time.monotonic() + _LISTING_TTL, list(items))
         return items
+
+    def _invalidate_listing_cache(self) -> None:
+        with self._children_lock:
+            self._children_cache.clear()
 
     def _list_children_web(self, directory_id: str) -> list[dict]:
         """web /files 兜底列目录。limit 用 1000，offset 正常分页，count 是总数。"""
@@ -320,9 +335,11 @@ class Pan115:
 
     def move(self, file_id: str, directory_id: str) -> None:
         self._post("/files/move", {"ids": file_id, "to_cid": directory_id, "user_id": self.user_id})
+        self._invalidate_listing_cache()
 
     def rename(self, file_id: str, new_name: str) -> None:
         self._post("/files/batch_rename", {f"files_new_name[{file_id}]": new_name})
+        self._invalidate_listing_cache()
 
     def _relocate_file(self, item: dict, code_id: str, cloud_id: str, min_bytes: int) -> str:
         file_id = _file_id(item)
