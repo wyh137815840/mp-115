@@ -48,6 +48,20 @@ Emby 用 Unraid 上的 `http://192.168.1.9:8096`。插件刷新时走 MoviePilot
 
 定时留空就只手动运行。打开「保存后立即运行一次」，或调用插件接口 `POST /api/v1/plugin/Av115Scraper/run`。
 
+### 按目录扫描（1.5.11+）
+
+不想改「115 目录」配置、只想补某几个目录时，用 `run_roots`：
+
+```bash
+curl -X POST "http://<moviepilot>:3000/api/v1/plugin/Av115Scraper/run_roots" \
+  -H "X-API-KEY: <token>" -H 'Content-Type: application/json' \
+  -d '{"roots":["/AV/SSIS-001","/AV/EBOD-531"]}'
+```
+
+- 走插件当前「只预览 / 覆盖已有 nfo / 刷新 Emby」配置，不改 `cloud_paths`；
+- 插件内 `/AV` 等目录列表有 60 秒缓存（移动/改名/建目录时失效），多目录扫描明显更快；
+- 返回 `{"ok":true,...}` 后可用 `GET /api/v1/plugin/Av115Scraper/status` 看结果。
+
 ## 规则
 
 - 有码：`SSIS-001`、`ssis001`、`ABP-123C`。字幕记为 `-C`，破解记为 `-UC`。
