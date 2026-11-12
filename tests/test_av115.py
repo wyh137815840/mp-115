@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 import types
 import unittest
@@ -179,8 +181,9 @@ class IntakeTests(unittest.TestCase):
         self.assertNotIn("番号或磁力", init)
         self.assertNotIn("番号和磁力", init)
         self.assertNotIn("这条磁力", init)
-        self.assertIn("plugin_version = \"1.5.8\"", init)
-        self.assertIn('"version": "1.5.8"', package)
+        init_version = re.search(r'plugin_version = "([^"]+)"', init).group(1)
+        self.assertEqual(json.loads(package)["Av115Scraper"]["version"], init_version)
+        self.assertIn(f'"version": "{init_version}"', package)
         self.assertIn("ed2k 链接", package)
         self.assertIn("fs_mkdir", package)
 
