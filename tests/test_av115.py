@@ -351,5 +351,50 @@ class EnsureDirTests(unittest.TestCase):
         self.assertIn("fs_dir_getid", source)
 
 
+class ListChildrenPagingTests(unittest.TestCase):
+    """aps 在 offset >= 总数时会从头返回整页；不能只看 len(page) < 500 终止。"""
+
+    def _pan(self, rows):
+        import httpx
+
+        import av115_pan
+
+        calls = []
+
+        def handler(request):
+            offset = int(request.url.params.get("offset") or 0)
+            calls.append(offset)
+            page = rows[offset:offset + 500] if offset < len(rows) else rows[:500]
+            return httpx.Response(200, json={"state": True, "count": 500, "offset": offset, "data": page})
+
+        pan = av115_pan.Pan115("UID=1_A; CID=x; SEID=y; KID=z")
+        pan.http.close()
+        pan.http = httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
+        return pan, calls
+
+    def test_full_page_equal_to_total_does_not_loop(self):
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(500)]
+        pan, calls = self._pan(rows)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 500)
+        self.assertLessEqual(len(calls), 2, "回绕后应立即停止")
+
+    def test_short_last_page_stops_without_duplicates(self):
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(700)]
+        pan, calls = self._pan(rows)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 700)
+        self.assertEqual([row["fid"] for row in got], [str(i) for i in range(700)])
+        self.assertEqual(calls, [0, 500])
+
+
 if __name__ == "__main__":
     unittest.main()

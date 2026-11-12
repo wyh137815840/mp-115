@@ -7,6 +7,13 @@ import time
 
 import httpx
 
+try:  # 插件外单独跑（测试/脚本）时也能用
+    from app.log import logger
+except Exception:  # pragma: no cover - MoviePilot 外运行
+    import logging
+
+    logger = logging.getLogger("av115_pan")
+
 from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 
 # 列目录走 aps。搜索、移动、重命名仍走 App。
@@ -15,6 +22,8 @@ from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
 _PAGE = 500
+# aps 回绕兜底：正常目录远小于这个页数（500*200=10 万条）
+_APS_MAX_PAGES = 200
 # App 接口连续请求过快也会回 405，全量扫描时宁可慢，避免 115 风控。
 _GAP_SECONDS = 2.5
 _RETRY_WAITS = (5, 20, 40)
@@ -206,9 +215,19 @@ class Pan115:
         return _items(found)
 
     def list_children(self, directory_id: str) -> list[dict]:
+        """列目录。
+
+        aps 的 offset >= 目录条目总数时会从头返回一整页（响应里的 offset 仍回显
+        请求值，count 也是页大小），所以只用 len(page) < _PAGE 终止会无限循环：
+        目录条目数恰好是 500 的整数倍时（生产 /AV 就是 500 项）会一直重取第一页。
+        这里按「本页没有新条目」识别回绕并终止，另加页数上限兜底。
+        """
         items = []
+        seen = set()
         offset = 0
-        while True:
+        pages = 0
+        while pages < _APS_MAX_PAGES:
+            pages += 1
             found = self._call("GET", "", url=_APS_LIST, params={
                 "cid": directory_id,
                 "limit": _PAGE,
@@ -217,10 +236,26 @@ class Pan115:
                 "aid": 1,
             })
             page = [_from_aps(row, directory_id) for row in _items(found)]
-            items.extend(page)
+            new = []
+            for row in page:
+                key = _file_id(row) or _name(row)
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                new.append(row)
+            items.extend(new)
+            if not page:
+                break
+            if not new:
+                # 服务端回绕到第一页，再往后也是重复数据。
+                break
             if len(page) < _PAGE:
-                return items
+                break
             offset += _PAGE
+        if pages >= _APS_MAX_PAGES:
+            logger.warning("115 aps 目录 %s 分页超过 %s 页，已截断", directory_id, _APS_MAX_PAGES)
+        return items
 
     def move(self, file_id: str, directory_id: str) -> None:
         self._post("/files/move", {"ids": file_id, "to_cid": directory_id, "user_id": self.user_id})
