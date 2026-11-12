@@ -52,7 +52,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.10"
+    plugin_version = "1.5.11"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -169,6 +169,14 @@ class Av115Scraper(_PluginBase):
                 "auth": "apikey",
                 "summary": "立即刮削",
                 "description": "按当前配置扫描 115 并刮削",
+            },
+            {
+                "path": "/run_roots",
+                "endpoint": self.api_run_roots,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "按指定 115 目录运行",
+                "description": "JSON 正文 {\"roots\":[\"/AV/SSIS-001\", ...]}，按这些目录扫描，不改插件配置。",
             },
             {
                 "path": "/status",
@@ -363,6 +371,29 @@ class Av115Scraper(_PluginBase):
             return {"ok": False, "error": "插件未启用"}
         threading.Thread(target=self.run, name="av115-api", daemon=True).start()
         return {"ok": True, "message": "已开始"}
+
+    async def api_run_roots(self, request: Request) -> dict:
+        """按指定 115 目录扫描，不改插件配置（避免临时改 cloud_paths 的副作用）。"""
+        if not self._enabled:
+            return {"ok": False, "error": "插件未启用"}
+        payload = await _read_body(request)
+        raw = payload.get("roots") if isinstance(payload, dict) else None
+        if isinstance(raw, str):
+            roots = [line.strip() for line in raw.splitlines() if line.strip()]
+        elif isinstance(raw, list):
+            roots = [str(item).strip() for item in raw if str(item).strip()]
+        else:
+            roots = []
+        if not roots:
+            return {"ok": False, "error": "roots 不能为空"}
+        roots = [item if item.startswith("/") else f"/{item}" for item in roots]
+        threading.Thread(
+            target=self.run,
+            kwargs={"roots": roots},
+            name="av115-roots-api",
+            daemon=True,
+        ).start()
+        return {"ok": True, "message": f"已开始扫描 {len(roots)} 个目录", "roots": roots}
 
     def api_status(self) -> dict:
         return self.get_data("last_run") or {"ok": False, "error": "还没有运行记录"}

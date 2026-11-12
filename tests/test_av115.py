@@ -449,5 +449,57 @@ class ListChildrenPagingTests(unittest.TestCase):
         self.assertGreaterEqual(len(calls["web"]), 3)
 
 
+class ListChildrenCacheTests(unittest.TestCase):
+    """同一进程重复列同一目录不重复请求；写操作后缓存失效。"""
+
+    def _pan(self):
+        import httpx
+
+        import av115_pan
+
+        calls = {"get": 0, "post": 0}
+
+        def handler(request):
+            if request.method == "POST":
+                calls["post"] += 1
+                return httpx.Response(200, json={"state": True})
+            calls["get"] += 1
+            return httpx.Response(200, json={"state": True, "count": 2, "offset": 0, "data": [
+                {"fid": "1", "cid": "0", "n": "a.mp4", "fc": "1", "s": 10, "pc": "p" * 17},
+                {"fid": "2", "cid": "0", "n": "b.mp4", "fc": "1", "s": 10, "pc": "p" * 17},
+            ]})
+
+        pan = av115_pan.Pan115("UID=1_A; CID=x; SEID=y; KID=z")
+        pan.http.close()
+        pan.http = httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
+        return pan, calls
+
+    def test_second_listing_uses_cache(self):
+        pan, calls = self._pan()
+        try:
+            self.assertEqual(len(pan.list_children("9")), 2)
+            self.assertEqual(len(pan.list_children("9")), 2)
+        finally:
+            pan.http.close()
+        self.assertEqual(calls["get"], 1)
+
+    def test_move_invalidates_cache(self):
+        pan, calls = self._pan()
+        try:
+            pan.list_children("9")
+            pan.move("1", "2")
+            pan.list_children("9")
+        finally:
+            pan.http.close()
+        self.assertEqual(calls["post"], 1)
+        self.assertEqual(calls["get"], 2)
+
+    def test_run_roots_api_is_declared(self):
+        init = (ROOT / "plugins.v2" / "av115scraper" / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn('"/run_roots"', init)
+        self.assertIn("api_run_roots", init)
+        self.assertIn("roots 不能为空", init)
+
+
 if __name__ == "__main__":
     unittest.main()
