@@ -62,6 +62,21 @@ curl -X POST "http://<moviepilot>:3000/api/v1/plugin/Av115Scraper/run_roots" \
 - 插件内 `/AV` 等目录列表有 60 秒缓存（移动/改名/建目录时失效），多目录扫描明显更快；
 - 返回 `{"ok":true,...}` 后可用 `GET /api/v1/plugin/Av115Scraper/status` 看结果。
 
+### Emby 多版本合并（1.5.12+）
+
+同一番号有多个 strm 时（例如 `CAWB-001` 与 `CAWB-001-UC`），Emby 会把它们显示成多个同名条目。插件新增接口可把它们合成一个条目下的多个「版本」：
+
+```bash
+curl -X POST "http://<moviepilot>:3000/api/v1/plugin/Av115Scraper/merge_versions" \
+  -H "X-API-KEY: <token>"
+```
+
+- 只使用 MoviePilot 里已保存的 Emby 地址/密钥，读取 `Emby 媒体库名`（默认 `AV`）；
+- 按 `javbus`/`fc2` 的 ProviderId 分组；MetaTube 仅在路径番号一致时使用，避免串号误合并；
+- 内容完全相同的两个 strm 不合并（先去重）；已合并的组会跳过；
+- 返回 `groups/merged/skipped_already/skipped_identical/failed`；
+- 可挂在定时任务里定期执行。
+
 ## 规则
 
 - 有码：`SSIS-001`、`ssis001`、`ABP-123C`。字幕记为 `-C`，破解记为 `-UC`。

@@ -24,6 +24,7 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
+from av115_emby import group_version_items
 from av115_fc2 import Fc2Client
 from av115_intake import classify_line, is_offline_kind, is_offline_task
 from av115_javbus import JavBusClient, default_fetch, download_bytes
@@ -52,7 +53,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.11"
+    plugin_version = "1.5.12"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -177,6 +178,14 @@ class Av115Scraper(_PluginBase):
                 "auth": "apikey",
                 "summary": "按指定 115 目录运行",
                 "description": "JSON 正文 {\"roots\":[\"/AV/SSIS-001\", ...]}，按这些目录扫描，不改插件配置。",
+            },
+            {
+                "path": "/merge_versions",
+                "endpoint": self.api_merge_versions,
+                "methods": ["POST"],
+                "auth": "apikey",
+                "summary": "合并 Emby 多版本",
+                "description": "扫描 Emby AV 库，把同一番号的不同 strm 合并为一个条目下的多个版本；内容完全相同的两个 strm 不合并。",
             },
             {
                 "path": "/status",
@@ -371,6 +380,131 @@ class Av115Scraper(_PluginBase):
             return {"ok": False, "error": "插件未启用"}
         threading.Thread(target=self.run, name="av115-api", daemon=True).start()
         return {"ok": True, "message": "已开始"}
+
+    @staticmethod
+    def _emby_http_json(host: str, key: str, path: str, params: dict) -> dict:
+        import json
+        import urllib.parse
+        import urllib.request
+
+        query = urllib.parse.urlencode({**params, "api_key": key})
+        url = f"{host.rstrip('/')}/{path.lstrip('/')}?{query}"
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    @staticmethod
+    def _emby_merge_http(host: str, key: str, ids: list) -> bool:
+        import urllib.parse
+        import urllib.request
+
+        ids_q = urllib.parse.quote(",".join(str(item) for item in ids))
+        url = f"{host.rstrip('/')}/emby/Videos/MergeVersions?Ids={ids_q}&api_key={urllib.parse.quote(key)}"
+        request = urllib.request.Request(url, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as resp:
+                return 200 <= int(resp.status) < 300
+        except Exception:
+            return False
+
+    @staticmethod
+    def _same_strm_content(rows: list) -> bool:
+        import hashlib
+
+        seen = set()
+        for row in rows:
+            path = str(row.get("Path") or "")
+            try:
+                with open(path, "rb") as fh:
+                    seen.add(hashlib.md5(fh.read()).hexdigest())
+            except OSError:
+                return False
+        return len(seen) == 1
+
+    def _emby_merge_versions(self) -> dict:
+        try:
+            from app.core.module import ModuleManager
+            from app.schemas.types import ModuleType
+        except Exception as exc:
+            return {"ok": False, "error": f"无法加载媒体服务器模块：{exc}"}
+        wanted = self._emby_library.casefold()
+        for module in ModuleManager().get_running_type_modules(ModuleType.MediaServer):
+            if module.__class__.__name__ != "EmbyModule":
+                continue
+            for name, server in (module.get_instances() or {}).items():
+                host = str(getattr(server, "_host", "") or "").rstrip("/")
+                key = str(getattr(server, "_apikey", "") or "")
+                if not host or not key:
+                    continue
+                libraries = server.get_librarys() or []
+                target = next(
+                    (
+                        library for library in libraries
+                        if str(getattr(library, "name", "") or "").casefold() == wanted
+                    ),
+                    None,
+                )
+                if target is None:
+                    continue
+                try:
+                    data = self._emby_http_json(
+                        host,
+                        key,
+                        "emby/Items",
+                        {
+                            "ParentId": str(target.id),
+                            "Recursive": "true",
+                            "IncludeItemTypes": "Movie",
+                            "Fields": "Path,ProviderIds,PresentationUniqueKey",
+                            "Limit": "5000",
+                        },
+                    )
+                    items = data.get("Items") or []
+                except Exception as exc:
+                    return {"ok": False, "error": f"读取 Emby 条目失败：{exc}"}
+                groups = group_version_items(items)
+                merged, failed = [], []
+                skipped_already = 0
+                skipped_identical = 0
+                for group in groups:
+                    rows = group["items"]
+                    keys = {str(row.get("PresentationUniqueKey") or "") for row in rows}
+                    if len(keys) == 1 and all(keys):
+                        skipped_already += 1
+                        continue
+                    if self._same_strm_content(rows):
+                        skipped_identical += 1
+                        continue
+                    ids = [str(row.get("Id")) for row in rows if row.get("Id")]
+                    if len(ids) < 2:
+                        continue
+                    done = False
+                    for _attempt in range(3):
+                        if self._emby_merge_http(host, key, ids):
+                            done = True
+                            break
+                        time.sleep(1.0)
+                    if done:
+                        merged.append(group["id"])
+                    else:
+                        failed.append(group["id"])
+                return {
+                    "ok": True,
+                    "emby": name,
+                    "library": str(target.name),
+                    "groups": len(groups),
+                    "merged": merged,
+                    "skipped_already": skipped_already,
+                    "skipped_identical": skipped_identical,
+                    "failed": failed,
+                }
+        return {"ok": False, "error": "MoviePilot 里没有可用的 Emby/媒体库"}
+
+    async def api_merge_versions(self) -> dict:
+        if not self._enabled:
+            return {"ok": False, "error": "插件未启用"}
+        import asyncio
+
+        return await asyncio.to_thread(self._emby_merge_versions)
 
     async def api_run_roots(self, request: Request) -> dict:
         """按指定 115 目录扫描，不改插件配置（避免临时改 cloud_paths 的副作用）。"""
