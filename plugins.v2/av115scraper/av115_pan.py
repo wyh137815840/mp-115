@@ -7,6 +7,13 @@ import time
 
 import httpx
 
+try:  # 插件外单独跑（测试/脚本）时也能用
+    from app.log import logger
+except Exception:  # pragma: no cover - MoviePilot 外运行
+    import logging
+
+    logger = logging.getLogger("av115_pan")
+
 from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 
 # 列目录走 aps。搜索、移动、重命名仍走 App。
@@ -14,7 +21,12 @@ from av115_scan import VIDEO_EXTS, CloudFile, _is_video, _suffix, join, norm
 # 路径已在时用网页 getid；返回的 id 为 0 表示还没看见，不当成目录。扫描列目录不走 getid。
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
+# 大目录兜底：web /files 支持大 limit 与正常 offset 分页，count 是目录总条目数。
+_WEB_LIST = "https://webapi.115.com/files"
+_WEB_PAGE = 1000
 _PAGE = 500
+# aps 回绕兜底：正常目录远小于这个页数（500*200=10 万条）
+_APS_MAX_PAGES = 200
 # App 接口连续请求过快也会回 405，全量扫描时宁可慢，避免 115 风控。
 _GAP_SECONDS = 2.5
 _RETRY_WAITS = (5, 20, 40)
@@ -206,9 +218,22 @@ class Pan115:
         return _items(found)
 
     def list_children(self, directory_id: str) -> list[dict]:
+        """列目录。
+
+        aps 的 offset 到边界时会从头返回一整页（响应 offset 回显请求值），而且
+        每种排序只开放前约 1200 项；只用 len(page) < _PAGE 终止会无限循环（生产
+        /AV 目录 503 项时发生过）。这里做三件事：
+        1) 按 id 去重，本页没有新条目视为回绕，立即停止；
+        2) 用 aps 返回的 count（目录总条目数）判断是否漏项；
+        3) 漏项时用 web /files（limit=1000、offset 正常分页、count 为总数）补齐。
+        """
         items = []
+        seen = set()
         offset = 0
-        while True:
+        pages = 0
+        total = None
+        while pages < _APS_MAX_PAGES:
+            pages += 1
             found = self._call("GET", "", url=_APS_LIST, params={
                 "cid": directory_id,
                 "limit": _PAGE,
@@ -216,11 +241,82 @@ class Pan115:
                 "show_dir": 1,
                 "aid": 1,
             })
-            page = [_from_aps(row, directory_id) for row in _items(found)]
-            items.extend(page)
-            if len(page) < _PAGE:
-                return items
+            raw = _items(found)
+            count = found.get("count")
+            if total is None and isinstance(count, int) and count >= 0:
+                total = count
+            page = [_from_aps(row, directory_id) for row in raw]
+            new = []
+            for row in page:
+                key = _file_id(row) or _name(row)
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                new.append(row)
+            items.extend(new)
+            if not raw:
+                break
+            if not new:
+                # 服务端回绕到第一页，再往后也是重复数据。
+                break
+            if len(raw) < _PAGE:
+                break
             offset += _PAGE
+        if pages >= _APS_MAX_PAGES:
+            logger.warning("115 aps 目录 %s 分页超过 %s 页，已截断", directory_id, _APS_MAX_PAGES)
+        missing = total is not None and len(items) < total
+        if missing:
+            try:
+                web = self._list_children_web(directory_id)
+            except Exception as exc:
+                logger.warning("115 目录 %s 漏项（%s/%s），web 兜底失败：%s",
+                               directory_id, len(items), total, exc)
+                web = []
+            if len(web) > len(items):
+                logger.info("115 目录 %s aps 只取到 %s 项，web 兜底取到 %s 项",
+                            directory_id, len(items), len(web))
+                items = web
+        if total is not None and len(items) < total:
+            logger.warning("115 目录 %s 只列出 %s/%s 项，可能被接口上限截断",
+                           directory_id, len(items), total)
+        return items
+
+    def _list_children_web(self, directory_id: str) -> list[dict]:
+        """web /files 兜底列目录。limit 用 1000，offset 正常分页，count 是总数。"""
+        items = []
+        seen = set()
+        offset = 0
+        while offset <= _APS_MAX_PAGES * _WEB_PAGE:
+            _pace()
+            response = self.http.get(_WEB_LIST, params={
+                "cid": directory_id,
+                "offset": offset,
+                "limit": _WEB_PAGE,
+                "show_dir": 1,
+                "aid": 1,
+            }, timeout=20)
+            payload = _checked(response, "/files")
+            raw = _items(payload)
+            if not raw:
+                break
+            page = [_from_aps(row, directory_id) for row in raw]
+            new = 0
+            for row in page:
+                key = _file_id(row) or _name(row)
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                items.append(row)
+                new += 1
+            count = payload.get("count")
+            if isinstance(count, int) and count >= 0 and len(items) >= count:
+                break
+            if len(raw) < _WEB_PAGE or not new:
+                break
+            offset += _WEB_PAGE
+        return items
 
     def move(self, file_id: str, directory_id: str) -> None:
         self._post("/files/move", {"ids": file_id, "to_cid": directory_id, "user_id": self.user_id})

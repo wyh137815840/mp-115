@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 import types
 import unittest
@@ -179,8 +181,9 @@ class IntakeTests(unittest.TestCase):
         self.assertNotIn("番号或磁力", init)
         self.assertNotIn("番号和磁力", init)
         self.assertNotIn("这条磁力", init)
-        self.assertIn("plugin_version = \"1.5.8\"", init)
-        self.assertIn('"version": "1.5.8"', package)
+        init_version = re.search(r'plugin_version = "([^"]+)"', init).group(1)
+        self.assertEqual(json.loads(package)["Av115Scraper"]["version"], init_version)
+        self.assertIn(f'"version": "{init_version}"', package)
         self.assertIn("ed2k 链接", package)
         self.assertIn("fs_mkdir", package)
 
@@ -349,6 +352,101 @@ class EnsureDirTests(unittest.TestCase):
         self.assertNotIn('"/folder/update"', source)
         self.assertIn("fs_mkdir", source)
         self.assertIn("fs_dir_getid", source)
+
+
+class ListChildrenPagingTests(unittest.TestCase):
+    """aps 在 offset >= 总数时会从头返回整页；不能只看 len(page) < 500 终止。"""
+
+    def _pan(self, rows):
+        import httpx
+
+        import av115_pan
+
+        calls = []
+
+        def handler(request):
+            offset = int(request.url.params.get("offset") or 0)
+            calls.append(offset)
+            page = rows[offset:offset + 500] if offset < len(rows) else rows[:500]
+            return httpx.Response(200, json={"state": True, "count": 500, "offset": offset, "data": page})
+
+        pan = av115_pan.Pan115("UID=1_A; CID=x; SEID=y; KID=z")
+        pan.http.close()
+        pan.http = httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
+        return pan, calls
+
+    def test_full_page_equal_to_total_does_not_loop(self):
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(500)]
+        pan, calls = self._pan(rows)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 500)
+        self.assertLessEqual(len(calls), 2, "回绕后应立即停止")
+
+    def test_short_last_page_stops_without_duplicates(self):
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(700)]
+        pan, calls = self._pan(rows)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 700)
+        self.assertEqual([row["fid"] for row in got], [str(i) for i in range(700)])
+        self.assertEqual(calls, [0, 500])
+
+
+    def _pan_with_fallback(self, total):
+        import httpx
+
+        import av115_pan
+
+        rows = [{"fid": str(i), "cid": "1", "n": f"f{i}.mp4", "fc": "1", "s": 10, "pc": "p" * 17}
+                for i in range(total)]
+        calls = {"aps": [], "web": []}
+
+        def handler(request):
+            from urllib.parse import parse_qs
+
+            params = parse_qs(request.url.query.decode())
+            offset = int(params.get("offset", ["0"])[0])
+            limit = int(params.get("limit", ["500"])[0])
+            is_aps = "natsort" in request.url.path
+            calls["aps" if is_aps else "web"].append(offset)
+            if is_aps:
+                # aps 只给前 500 条；offset 到边界后从头回绕
+                page = rows[:500] if offset >= 500 else rows[offset:offset + 500]
+                return httpx.Response(200, json={"state": True, "count": total, "offset": offset, "data": page})
+            page = rows[offset:offset + limit]
+            return httpx.Response(200, json={"state": True, "count": total, "offset": offset, "data": page})
+
+        pan = av115_pan.Pan115("UID=1_A; CID=x; SEID=y; KID=z")
+        pan.http.close()
+        pan.http = httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
+        return pan, calls
+
+    def test_aps_truncation_falls_back_to_web_files(self):
+        pan, calls = self._pan_with_fallback(503)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 503)
+        self.assertEqual(len({row["fid"] for row in got}), 503)
+        self.assertTrue(calls["web"], "aps 只取到 500/503 时应走 web 兜底")
+
+    def test_web_fallback_handles_more_than_aps_window(self):
+        pan, calls = self._pan_with_fallback(2500)
+        try:
+            got = pan.list_children("1")
+        finally:
+            pan.http.close()
+        self.assertEqual(len(got), 2500)
+        self.assertEqual(len({row["fid"] for row in got}), 2500)
+        self.assertGreaterEqual(len(calls["web"]), 3)
 
 
 if __name__ == "__main__":
