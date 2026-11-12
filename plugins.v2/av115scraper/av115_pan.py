@@ -39,6 +39,12 @@ _GETID_RACE_WAITS = (0.4, 0.8)
 _EXISTS_ERRNO = {"20004"}
 _pace_lock = threading.Lock()
 _last_call = [0.0]
+try:  # 跨插件共享的 115 操作池（与 Anime115 共用状态）
+    from av115_guard import looks_like_risk as _guard_risk
+    from av115_guard import trip as _guard_trip
+    from av115_guard import wait as _guard_wait
+except Exception:  # pragma: no cover
+    _guard_risk = _guard_trip = _guard_wait = None
 
 
 class Pan115:
@@ -378,6 +384,17 @@ class Pan115:
             if response.status_code in _RETRY_STATUS:
                 last = f"115 {path} 返回 {response.status_code}"
                 continue
+            text = ""
+            try:
+                text = response.text
+            except Exception:
+                text = ""
+            if _guard_risk is not None and (_guard_risk(text) or response.status_code == 403):
+                try:
+                    _guard_trip(f"115 {path} 风控（HTTP {response.status_code}）")
+                except Exception:
+                    pass
+                raise RuntimeError(f"115 {path} 触发风控（HTTP {response.status_code}），已熔断 115 操作池")
             return _checked(response, path)
         raise RuntimeError(last)
 
@@ -430,6 +447,9 @@ class CookieStorage:
 
 
 def _pace() -> None:
+    if _guard_wait is not None:
+        _guard_wait()
+        return
     with _pace_lock:
         delay = _last_call[0] + _GAP_SECONDS - time.monotonic()
         if delay > 0:

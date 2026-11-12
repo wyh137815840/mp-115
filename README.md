@@ -77,6 +77,17 @@ curl -X POST "http://<moviepilot>:3000/api/v1/plugin/Av115Scraper/merge_versions
 - 返回 `groups/merged/skipped_already/skipped_identical/failed`；
 - 可挂在定时任务里定期执行。
 
+### 共享 115 操作池（1.5.13+）
+
+Av115Scraper 与 Anime115 共用一份 115 调用节奏和熔断状态（文件锁 + JSON 状态）：
+
+- 状态目录：`/config/scripts/av-auto-fs/115_pool/`（`state.json`、`lock`）；
+- 全局节奏默认 **2.5 秒/次**，`AV115_GUARD_GAP` 可调；
+- 检测到验证码/风控/账号异常/911/403 时写入熔断，默认冷却 **1800 秒**（`AV115_GUARD_COOLDOWN`）；
+- 任一插件触发熔断，另一个插件下一次 115 调用会直接报「115 操作池冷却中」；
+- 两个插件在 `_pace()/_call()` 接入，不会在熔断期间继续发请求；
+- 人工解除：删除/编辑 `115_pool/state.json` 里的 `blocked_until`，或调用 `av115_guard.clear()`。
+
 ## 规则
 
 - 有码：`SSIS-001`、`ssis001`、`ABP-123C`。字幕记为 `-C`，破解记为 `-UC`。
