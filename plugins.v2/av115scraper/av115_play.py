@@ -24,6 +24,11 @@ LEGACY_WAN_PLAY_BASE = (
     "?pickcode={pickcode}&file_name={filename}"
 )
 WAN_PLAY_BASE = (
+    "https://mp.yuanhot.top:8443/api/v1/plugin/Av115Scraper/redirect"
+    "?pickcode={pickcode}&file_name={filename}"
+)
+# 2026-11 备案期临时切换：旧默认是 443，读取旧配置时自动迁移到 8443。
+OLD_WAN_PLAY_BASE_443 = (
     "https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect"
     "?pickcode={pickcode}&file_name={filename}"
 )
@@ -40,7 +45,7 @@ DEFAULT_LAN_NETWORKS = (
 def normalize_play_base(value: str) -> str:
     """空值和旧的 P115StrmHelper 默认模板，都换成外网侧的本插件跳转。"""
     text = (value or "").strip()
-    if not text or text == LEGACY_WAN_PLAY_BASE:
+    if not text or text in {LEGACY_WAN_PLAY_BASE, OLD_WAN_PLAY_BASE_443}:
         return WAN_PLAY_BASE
     return text
 
