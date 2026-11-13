@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-WAN_PREFIX = "https://mp.yuanhot.top"
+WAN_PREFIX = "https://mp.yuanhot.top:8443"
 LAN_PREFIX = "http://192.168.1.9:3000"
 
 
@@ -19,6 +19,8 @@ def normalize_url(text: str) -> str:
         return url
     if LAN_PREFIX in url:
         url = url.replace(LAN_PREFIX, WAN_PREFIX, 1)
+    elif url.startswith("https://mp.yuanhot.top/") or url.startswith("https://mp.yuanhot.top?"):
+        url = WAN_PREFIX + url[len("https://mp.yuanhot.top"):]
     if "file_name=" not in url:
         return url
     head, raw = url.split("file_name=", 1)

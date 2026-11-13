@@ -18,7 +18,7 @@ class NormalizeUrlTest(unittest.TestCase):
     def test_lan_base_and_spaces_are_fixed(self):
         old = BASE + "[LoliHouse] Show - 01 [WebRip 1080p].mkv"
         new = normalize_url(old)
-        self.assertTrue(new.startswith("https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect?"))
+        self.assertTrue(new.startswith("https://mp.yuanhot.top:8443/api/v1/plugin/Av115Scraper/redirect?"))
         name = new.split("file_name=", 1)[1]
         self.assertNotIn(" ", name)
         self.assertNotIn("[", name)
@@ -37,7 +37,7 @@ class NormalizeUrlTest(unittest.TestCase):
         self.assertNotIn("%25", new.split("file_name=", 1)[1])
 
     def test_url_without_file_name_keeps_path(self):
-        old = "https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect?pickcode=abc"
+        old = "https://mp.yuanhot.top:8443/api/v1/plugin/Av115Scraper/redirect?pickcode=abc"
         self.assertEqual(normalize_url(old), old)
 
 

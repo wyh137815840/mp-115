@@ -26,7 +26,7 @@ PICK = "abc123pickcodeXYZ"
 
 def _redirect(**overrides) -> str | None:
     values = {
-        "host": "mp.yuanhot.top",
+        "host": "mp.yuanhot.top:8443",
         "forwarded_host": "",
         "peer": "",
         "forwarded_for": "",
@@ -78,15 +78,15 @@ class RedirectTest(unittest.TestCase):
     def test_public_peer_that_dialed_lan_host_goes_to_public_domain(self):
         url = _redirect(host="192.168.1.9:3000", peer="8.8.8.8")
         self.assertIsNotNone(url)
-        self.assertTrue(url.startswith("https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect?"))
+        self.assertTrue(url.startswith("https://mp.yuanhot.top:8443/api/v1/plugin/Av115Scraper/redirect?"))
 
     def test_proxy_without_forwarded_client_is_not_treated_as_lan(self):
-        self.assertIsNone(_redirect(host="mp.yuanhot.top", peer="172.17.0.1"))
+        self.assertIsNone(_redirect(host="mp.yuanhot.top:8443", peer="172.17.0.1"))
 
     def test_forwarded_lan_client_on_public_name_behind_proxy(self):
         url = _redirect(
             host="192.168.1.9:3000",
-            forwarded_host="mp.yuanhot.top",
+            forwarded_host="mp.yuanhot.top:8443",
             forwarded_for="192.168.1.8, 172.17.0.1",
         )
         self.assertIsNotNone(url)
@@ -169,7 +169,7 @@ class StrmWriteTest(unittest.TestCase):
                 result=ScanResult(ok=True),
             )
             text = (folder / "SSIS-001.strm").read_text(encoding="utf-8")
-            self.assertIn("https://mp.yuanhot.top/api/v1/plugin/Av115Scraper/redirect", text)
+            self.assertIn("https://mp.yuanhot.top:8443/api/v1/plugin/Av115Scraper/redirect", text)
             self.assertNotIn("192.168.1.9", text)
 
     def test_scan_requires_a_play_template(self):
