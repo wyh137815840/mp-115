@@ -59,6 +59,18 @@ def choose_strm_template(play_base: str, play_base_lan: str, use_lan: bool) -> s
     return wan or lan
 
 
+def sign_user_agent(value: str | None) -> str:
+    """取 115 直链时要带上的 User-Agent。
+
+    115 的下载地址和取地址时的 UA 绑定（直链里的 `f=1`）：播放器拿直链来拉流时，
+    UA 必须和这里取地址用的完全一样，否则 115 返回 403。
+
+    空 UA 也要原样传下去：Emby 服务端拉 strm 时发的就是空 UA，旧代码把它兜底成
+    "Emby/4.0"，结果 Emby 用空 UA 拉流被 115 拒绝（403），客户端看到 500。
+    """
+    return value or ""
+
+
 def parse_networks(text: str) -> tuple[ipaddress._BaseNetwork, ...]:
     """解析网段。一条都无效时用内置私网，避免把所有人当成外网或内网。"""
     raw = text if (text or "").strip() else DEFAULT_LAN_NETWORKS

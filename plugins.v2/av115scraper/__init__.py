@@ -35,6 +35,7 @@ from av115_play import (
     LEGACY_WAN_PLAY_BASE,
     WAN_PLAY_BASE,
     redirect_location,
+    sign_user_agent,
 )
 from av115_scan import CloudFile, ScanOptions, join, name_of, norm, parent_path, run_scan
 
@@ -53,7 +54,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.15"
+    plugin_version = "1.5.16"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -563,7 +564,9 @@ class Av115Scraper(_PluginBase):
             logger.info("115 AV刮削按网络改播放入口：%s", location.split("?", 1)[0])
             return RedirectResponse(url=location, status_code=302)
         try:
-            url = self._download_url(pickcode, request.headers.get("user-agent") or "Emby/4.0")
+            url = self._download_url(
+                pickcode, sign_user_agent(request.headers.get("user-agent"))
+            )
         except Exception as exc:
             logger.exception("115 AV刮削跳转失败：%s", exc)
             return Response(content=f"resolve failed: {exc}", status_code=502)
@@ -722,11 +725,13 @@ class Av115Scraper(_PluginBase):
         directory_id = pan.ensure_dir(self._offline_save_path())
         return _offline_message(pan.add_magnet(url, directory_id))
 
-    def _download_url(self, pickcode: str, user_agent: str) -> str:
+    def _download_url(self, pickcode: str, user_agent: str = "") -> str:
         from p115client import P115Client
 
         pc = pickcode.strip().lower()
-        ua = user_agent or "Emby/4.0"
+        # 115 直链和取地址时的 UA 绑定。空 UA 也要原样传给 115，不能兜底成别的值，
+        # 否则 Emby 用空 UA 拉流时会被 403（详见 av115_play.sign_user_agent）。
+        ua = sign_user_agent(user_agent)
         if not hasattr(self, "_url_cache"):
             self._url_cache = {}
             self._url_lock = threading.Lock()

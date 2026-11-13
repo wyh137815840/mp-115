@@ -97,6 +97,15 @@ Av115Scraper 与 Anime115 共用一份 115 调用节奏和熔断状态（文件�
 - 不要二次编码（出现 `%25` 即错误）；
 - 历史 strm 用 `av115_strm_migrate.migrate("/media/AV")` 迁移：先反复 unquote 归一，再 quote 一次；同时把内网入口换成外网入口。
 
+### 直链和 User-Agent 绑定（1.5.16+）
+
+115 的下载链接和取地址时的 `User-Agent` 绑定（直链里 `f=1`）：播放器拉流时的 UA 必须和 `/redirect` 取地址时完全一致，否则 115 直接 403。
+
+- `/redirect` 把客户端发来的 `User-Agent` 原样交给 115，**空 UA 也传空**；
+- 不能兜底成 `Emby/4.0`：Emby 服务端拉 strm 用的是空 UA，兜底后必定 403，Emby 再把它变成 500（Infuse/VidHub 报「Server responded with status 500」）；
+- 同一个 pickcode 按 UA 分别缓存直链，TTL 与 115 的 `t` 过期时间对齐；
+- 动漫走 P115StrmHelper 的 `redirect_url` 同样按客户端 UA 取地址，所以同一套规则下动漫能播、AV 不能播时，先看这里。
+
 ## 规则
 
 - 有码：`SSIS-001`、`ssis001`、`ABP-123C`。字幕记为 `-C`，破解记为 `-UC`。

@@ -17,6 +17,7 @@ from av115_play import (  # noqa: E402
     choose_strm_template,
     normalize_play_base,
     redirect_location,
+    sign_user_agent,
 )
 from av115_library import build_play_url  # noqa: E402
 from av115_scan import CloudFile, ScanOptions, ScanResult, _handle_video, run_scan  # noqa: E402
@@ -58,6 +59,28 @@ class TemplateTest(unittest.TestCase):
     def test_strm_falls_back_when_chosen_side_is_empty(self):
         self.assertEqual(choose_strm_template(WAN_PLAY_BASE, "", True), WAN_PLAY_BASE)
         self.assertEqual(choose_strm_template("", LAN_PLAY_BASE, False), LAN_PLAY_BASE)
+
+
+class UserAgentSigningTest(unittest.TestCase):
+    """115 直链和取地址时的 User-Agent 绑定，空 UA 必须原样传。"""
+
+    def test_empty_header_stays_empty(self):
+        self.assertEqual(sign_user_agent(""), "")
+        self.assertEqual(sign_user_agent(None), "")
+
+    def test_no_emby_fallback(self):
+        # 旧代码把空 UA 兜底成 Emby/4.0，Emby 服务端用空 UA 拉流就会被 115 403。
+        self.assertNotEqual(sign_user_agent(""), "Emby/4.0")
+        self.assertNotEqual(sign_user_agent(None), "Emby/4.0")
+
+    def test_player_agent_is_verbatim(self):
+        for ua in (
+            "Lavf/59.27.100",
+            "Infuse-Direct/8.5.10",
+            "Emby/4.10.2.0",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X)",
+        ):
+            self.assertEqual(sign_user_agent(ua), ua)
 
 
 class RedirectTest(unittest.TestCase):
