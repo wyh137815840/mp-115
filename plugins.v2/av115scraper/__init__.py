@@ -53,7 +53,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.13"
+    plugin_version = "1.5.14"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -70,7 +70,7 @@ class Av115Scraper(_PluginBase):
     _play_base = WAN_PLAY_BASE
     _play_base_lan = LAN_PLAY_BASE
     _lan_networks = DEFAULT_LAN_NETWORKS
-    _strm_use_lan = True
+    _strm_use_lan = False
     _javbus_host = "https://www.javbus.com"
     _fc2_host = "https://fc2cmadb.com"
     _fc2_proxy = ""
@@ -115,9 +115,9 @@ class Av115Scraper(_PluginBase):
             self._play_base_lan = LAN_PLAY_BASE
         self._lan_networks = str(config.get("lan_networks") or "").strip() or DEFAULT_LAN_NETWORKS
         if "strm_use_lan" in config:
-            self._strm_use_lan = bool(config.get("strm_use_lan"))
+            self._strm_use_lan = bool(config.get("strm_use_lan", False))
         else:
-            self._strm_use_lan = True
+            self._strm_use_lan = False
         if "play_base_lan" not in config:
             config["play_base_lan"] = self._play_base_lan
             changed = True
@@ -306,7 +306,7 @@ class Av115Scraper(_PluginBase):
             "play_base": WAN_PLAY_BASE,
             "play_base_lan": LAN_PLAY_BASE,
             "lan_networks": DEFAULT_LAN_NETWORKS,
-            "strm_use_lan": True,
+            "strm_use_lan": False,
             "refresh_emby": True,
             "emby_library": "AV",
             "javbus_host": "https://www.javbus.com",

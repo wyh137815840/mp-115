@@ -27,7 +27,7 @@ def build_play_url(play_base: str, pickcode: str, filename: str) -> str:
     """生成 strm 内容。模板里可以写 {pickcode} 和 {filename}。"""
     template = (play_base or "").strip()
     code = quote((pickcode or "").strip(), safe=".-_")
-    name = quote((filename or "video").strip() or "video", safe=".-_()[] ")
+    name = quote((filename or "video").strip() or "video", safe=".-_")
     if "{pickcode}" in template or "{filename}" in template:
         return template.replace("{pickcode}", code).replace("{filename}", name)
     base = template.rstrip("/")

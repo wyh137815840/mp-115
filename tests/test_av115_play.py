@@ -18,6 +18,7 @@ from av115_play import (  # noqa: E402
     normalize_play_base,
     redirect_location,
 )
+from av115_library import build_play_url  # noqa: E402
 from av115_scan import CloudFile, ScanOptions, ScanResult, _handle_video, run_scan  # noqa: E402
 
 PICK = "abc123pickcodeXYZ"
@@ -175,6 +176,27 @@ class StrmWriteTest(unittest.TestCase):
         result = run_scan(None, ScanOptions(roots=["/AV"], strm_root="/media/AV", play_base="  "))
         self.assertFalse(result.ok)
         self.assertEqual(result.error, "没有填写播放地址")
+
+
+class PlayUrlEncodingTest(unittest.TestCase):
+    def test_spaces_brackets_and_ampersand_are_encoded(self):
+        url = build_play_url(
+            WAN_PLAY_BASE,
+            PICK,
+            "[Nekomoe kissaten&LoliHouse] Horemajo - 01 [WebRip 1080p].mkv",
+        )
+        self.assertIn(
+            "file_name=%5BNekomoe%20kissaten%26LoliHouse%5D%20Horemajo%20-%2001%20%5BWebRip%201080p%5D.mkv",
+            url,
+        )
+        name = url.split("file_name=", 1)[1]
+        for raw in (" ", "[", "]", "(", ")", "&"):
+            self.assertNotIn(raw, name)
+        self.assertNotIn("%25", name)
+
+    def test_plain_filename_still_works(self):
+        url = build_play_url(WAN_PLAY_BASE, PICK, "SSIS-001.mp4")
+        self.assertIn("file_name=SSIS-001.mp4", url)
 
 
 if __name__ == "__main__":
