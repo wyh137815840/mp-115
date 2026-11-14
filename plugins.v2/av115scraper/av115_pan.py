@@ -33,6 +33,12 @@ _LISTING_TTL = 60.0
 _GAP_SECONDS = 2.5
 _RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
+# aps 列目录被单独风控时只停用 aps，不锁整个 115 池；先用 web /files 顶着。
+_APS_RISK_COOLDOWN = 600
+
+
+class ApsRisk(RuntimeError):
+    """aps 列目录接口被风控。只影响列目录，不代表整个 115 账号不可用（web/App 仍可用）。"""
 _MKDIR_TRIES = 3
 _GETID_RACE_WAITS = (0.4, 0.8)
 # 网页 files/add 在目录已存在时返回这个 errno。
@@ -59,6 +65,8 @@ class Pan115:
         self._dirs = {"/": "0"}
         self._children_cache = {}
         self._children_lock = threading.Lock()
+        # aps 单独被风控后，这段时间内直接走 web /files，不再每列一次撞一次。
+        self._aps_skip_until = 0.0
         self.http = httpx.Client(
             timeout=20,
             follow_redirects=True,
@@ -242,6 +250,12 @@ class Pan115:
             cached = self._children_cache.get(str(directory_id))
             if cached is not None and cached[0] > time.monotonic():
                 return list(cached[1])
+        if time.monotonic() < float(getattr(self, "_aps_skip_until", 0.0)):
+            # aps 刚被风控过，这段时间直接用 web /files，别再去撞。
+            items = self._list_children_web(directory_id)
+            with self._children_lock:
+                self._children_cache[str(directory_id)] = (time.monotonic() + _LISTING_TTL, list(items))
+            return items
         items = []
         seen = set()
         offset = 0
@@ -249,13 +263,20 @@ class Pan115:
         total = None
         while pages < _APS_MAX_PAGES:
             pages += 1
-            found = self._call("GET", "", url=_APS_LIST, params={
-                "cid": directory_id,
-                "limit": _PAGE,
-                "offset": offset,
-                "show_dir": 1,
-                "aid": 1,
-            })
+            try:
+                found = self._call("GET", "", url=_APS_LIST, params={
+                    "cid": directory_id,
+                    "limit": _PAGE,
+                    "offset": offset,
+                    "show_dir": 1,
+                    "aid": 1,
+                })
+            except ApsRisk as exc:
+                logger.warning("115 aps 列目录被风控（%s），本次改用 web /files", exc)
+                items = self._list_children_web(directory_id)
+                with self._children_lock:
+                    self._children_cache[str(directory_id)] = (time.monotonic() + _LISTING_TTL, list(items))
+                return items
             raw = _items(found)
             count = found.get("count")
             if total is None and isinstance(count, int) and count >= 0:
@@ -390,6 +411,11 @@ class Pan115:
             except Exception:
                 text = ""
             if _guard_risk is not None and (_guard_risk(text) or response.status_code == 403):
+                if str(target).startswith(_APS_LIST):
+                    # aps 列目录单独被风控：只停用 aps 一会，改用 web /files；
+                    # 不能锁整个 115 池，web/App 还能用。
+                    self._aps_skip_until = time.monotonic() + _APS_RISK_COOLDOWN
+                    raise ApsRisk(f"115 aps 列目录风控（HTTP {response.status_code}）")
                 try:
                     _guard_trip(f"115 {path} 风控（HTTP {response.status_code}）")
                 except Exception:
