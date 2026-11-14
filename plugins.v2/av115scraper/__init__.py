@@ -28,6 +28,7 @@ from av115_emby import group_version_items
 from av115_fc2 import Fc2Client
 from av115_intake import classify_line, is_offline_kind, is_offline_task
 from av115_javbus import JavBusClient, default_fetch, download_bytes
+from av115_offline import clear_wait, is_due, mark_timeout, mark_waiting, timed_out
 from av115_pan import CookieStorage, Pan115
 from av115_play import (
     DEFAULT_LAN_NETWORKS,
@@ -54,7 +55,7 @@ class Av115Scraper(_PluginBase):
     plugin_name = "115 AV刮削"
     plugin_desc = "接收番号、磁力或 ed2k，扫描 115 里的有码、FC2 和无码番号。FC2 走资料站，其余刮削 JavBus，重命名并生成本地 strm。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.16"
+    plugin_version = "1.5.17"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "av115scraper_"
@@ -632,9 +633,26 @@ class Av115Scraper(_PluginBase):
             return []
         return tasks if isinstance(tasks, list) else []
 
+    def _pool_blocked(self):
+        """共享 115 池熔断时返回 Blocked，否则 None。"""
+        try:
+            import av115_guard
+
+            return av115_guard.blocked()
+        except Exception:
+            return None
+
     def _watch_offline(self) -> None:
         cancel = getattr(self, "_cancel", None)
         while cancel is None or not cancel.is_set():
+            block = self._pool_blocked()
+            if block is not None:
+                # 熔断期间一个 115 请求都不发；睡到冷却结束（最多 10 分钟一醒）。
+                wait_s = min(max(float(getattr(block, "retry_after", 300.0)) + 5, 30), 600)
+                logger.info("115 AV刮削离线监视：%s，%ss 内不碰 115", block, int(wait_s))
+                if cancel is not None and cancel.wait(wait_s):
+                    return
+                continue
             try:
                 self._flush_offline()
             except Exception as exc:
@@ -643,6 +661,10 @@ class Av115Scraper(_PluginBase):
                 return
 
     def _flush_offline(self) -> None:
+        block = self._pool_blocked()
+        if block is not None:
+            logger.info("115 AV刮削离线监视：%s，本轮不碰 115", block)
+            return
         for task in list(self._load_tasks()):
             if is_offline_task(task):
                 self._push_offline(task)
@@ -661,6 +683,10 @@ class Av115Scraper(_PluginBase):
         ]
         if not pending:
             return
+        now = datetime.now()
+        due = [task for task in pending if is_due(task, now)]
+        if not due:
+            return
         try:
             pan = Pan115(cookie)
             library = self._library_path()
@@ -670,17 +696,29 @@ class Av115Scraper(_PluginBase):
             logger.warning("115 AV刮削无法整理离线文件：%s", exc)
             return
         ready = []
-        for task in pending:
+        for task in due:
             code = task.get("code") or ""
             folder = f"{library.rstrip('/')}/{code}"
             try:
                 moved, junk, already = pan.relocate_code(code, library, cloud_id, min_bytes)
                 if moved + already <= 0:
-                    task["status"] = "offline"
-                    task["message"] = "115 还在下载，正片还没出现"
-                    logger.info("115 AV刮削等待 %s 下完", code)
+                    if timed_out(task, now):
+                        mark_timeout(task)
+                        logger.warning("115 AV刮削放弃等待 %s：%s", code, task.get("message"))
+                    else:
+                        delay = mark_waiting(task, now)
+                        task["status"] = "offline"
+                        task["message"] = (
+                            f"115 还在下载，正片还没出现（第 {task['settle_checks']} 次检查，"
+                            f"{delay}s 后再看）"
+                        )
+                        logger.info(
+                            "115 AV刮削等待 %s 下完（第 %s 次检查，%ss 后再看）",
+                            code, task["settle_checks"], delay,
+                        )
                     self._update_task(task)
                     continue
+                clear_wait(task)
                 task["settled"] = True
                 task["packed"] = True
                 task["status"] = "ready"
@@ -689,8 +727,13 @@ class Av115Scraper(_PluginBase):
                     ready.append(folder)
                 logger.info("115 AV刮削整理 %s：%s", code, task["message"])
             except Exception as exc:
-                task["message"] = str(exc)
-                logger.warning("115 AV刮削整理失败：%s", exc)
+                if timed_out(task, now):
+                    mark_timeout(task)
+                    logger.warning("115 AV刮削放弃等待 %s：%s", code, task.get("message"))
+                else:
+                    task["message"] = str(exc)
+                    delay = mark_waiting(task, now)
+                    logger.warning("115 AV刮削整理失败：%s（%ss 后再试）", exc, delay)
             self._update_task(task)
         if ready:
             threading.Thread(
@@ -709,6 +752,9 @@ class Av115Scraper(_PluginBase):
         try:
             task["message"] = self._add_offline(task.get("text") or "")
             task["status"] = "offline"
+            # 新提交从现在开始算等待时间；清掉上一轮的退避状态。
+            task["offline_since"] = _now()
+            clear_wait(task)
             logger.info("115 AV刮削已提交离线：%s", task.get("code") or task.get("id"))
         except Exception as exc:
             task["status"] = "failed"
